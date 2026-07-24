@@ -1,0 +1,87 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Theme tokens as RGB triplets so Tailwind opacity modifiers (text-ink/40)
+     keep working — tailwind.config.ts maps them via
+     rgb(var(--ink) / <alpha-value>). :root holds the light theme; .dark
+     (applied by components/ThemeToggle.tsx and the inline no-flash script in
+     app/layout.tsx) swaps in the original dark-console palette. */
+  :root {
+    --paper: 242 244 248;
+    --ink: 28 37 48;
+    --card: 255 255 255;
+    --panel: 250 251 253;
+    --rail: 233 237 243;
+    --line: 214 220 229;
+    --blueprint: 47 107 232;
+    --blueprint-50: 233 239 252;
+    --blueprint-100: 220 231 250;
+    --blueprint-200: 196 215 248;
+    --blueprint-400: 74 128 238;
+    --blueprint-600: 47 107 232;
+    --blueprint-700: 29 79 184;
+  }
+  .dark {
+    --paper: 27 34 43;
+    --ink: 232 236 242;
+    --card: 35 44 54;
+    --panel: 22 28 35;
+    --rail: 12 16 19;
+    --line: 51 61 73;
+    --blueprint: 62 123 250;
+    --blueprint-50: 30 43 71;
+    --blueprint-100: 35 52 89;
+    --blueprint-200: 44 66 112;
+    --blueprint-400: 90 141 245;
+    --blueprint-600: 62 123 250;
+    --blueprint-700: 156 192 255;
+  }
+  /* "System" mode in the theme toggle: Claude-style warm cream paper with
+     coral/terracotta accents (the blueprint-* tokens go orange here). */
+  .claude {
+    --paper: 240 238 230;
+    --ink: 31 30 28;
+    --card: 253 252 250;
+    --panel: 250 249 245;
+    --rail: 234 230 218;
+    --line: 213 207 192;
+    --blueprint: 217 119 87;
+    --blueprint-50: 246 232 223;
+    --blueprint-100: 242 218 203;
+    --blueprint-200: 237 198 176;
+    --blueprint-400: 204 107 71;
+    --blueprint-600: 217 119 87;
+    --blueprint-700: 157 74 38;
+  }
+
+  body {
+    @apply bg-paper text-ink font-body antialiased;
+  }
+  ::selection {
+    @apply bg-blueprint-200 text-ink;
+  }
+  /* Thin scrollbars to match the console look, in both themes. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--line)) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: rgb(var(--line));
+    border-radius: 4px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer utilities {
+  .focus-ring {
+    @apply outline-none ring-2 ring-blueprint-400 ring-offset-2 ring-offset-paper;
+  }
+}

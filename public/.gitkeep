@@ -1,0 +1,2 @@
+# Keeps this directory present so the Dockerfile can COPY /app/public.
+# Drop any static assets you want served at the site root in here.

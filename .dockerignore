@@ -1,0 +1,26 @@
+# Keep the build context small and NEVER bake secrets or local build output
+# into image layers.
+node_modules
+.next
+.git
+.gitignore
+
+# Secrets — must never enter the image.
+.env
+.env.*
+!.env.example
+
+# Deploy/infra files not needed inside the image.
+Dockerfile
+.dockerignore
+.gcloudignore
+cloudbuild.yaml
+deploy.ps1
+*.md
+
+# Local/editor cruft and stale build info.
+tsconfig.tsbuildinfo
+npm-debug.log*
+.DS_Store
+.vscode
+.idea

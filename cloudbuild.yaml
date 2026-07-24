@@ -1,0 +1,25 @@
+# Build the container from the repo Dockerfile and push it to Artifact
+# Registry. Triggered by deploy.ps1, which passes the full image path via
+# the _IMAGE substitution.
+#
+# No build-time secrets: this app reads every env var (SUPABASE_*,
+# GOOGLE_SERVICE_ACCOUNT_*) only at runtime, so they are set on the Cloud Run
+# service at deploy time (see deploy.ps1) and never baked into the image.
+
+substitutions:
+  _IMAGE: "" # full image path, e.g. REGION-docker.pkg.dev/PROJECT/REPO/SERVICE:latest
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-t", "${_IMAGE}", "."]
+
+# Listing the image here makes Cloud Build push it after a successful build.
+images:
+  - "${_IMAGE}"
+
+options:
+  # Avoids the "logs bucket / service account" requirement; logs go to Cloud
+  # Logging, viewable in the build history.
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 1200s

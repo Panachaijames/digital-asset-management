@@ -1,0 +1,20 @@
+# Controls what `gcloud builds submit` uploads as the build context.
+# The Dockerfile MUST NOT be excluded here (it is the build recipe).
+.git
+.gitignore
+
+# Installed/built locally — rebuilt inside Cloud Build.
+node_modules
+.next
+
+# Secrets — never upload them.
+.env
+.env.*
+!.env.example
+
+# Stale/local cruft.
+tsconfig.tsbuildinfo
+npm-debug.log*
+.DS_Store
+.vscode
+.idea
