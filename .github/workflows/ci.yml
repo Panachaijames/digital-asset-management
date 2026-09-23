@@ -1,0 +1,96 @@
+# Checks only. Nothing here deploys, pushes an image, links a Supabase project or writes to any
+# database: no secrets are configured or needed, and no job may ever be given them. Deploys and
+# `supabase db push` are run by hand by the repo owner (CLAUDE.md, supabase/migrations/README.md).
+# `next lint` is deliberately absent: the repo has no ESLint config, so it would start an
+# interactive setup prompt.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20 # matches the Dockerfile's node:20-alpine
+          cache: npm
+      - run: npm ci
+      # --incremental false: tsconfig.json sets incremental, and a plain --noEmit would rewrite
+      # the tracked tsconfig.tsbuildinfo.
+      - run: npx tsc --noEmit --incremental false
+
+  sql-static:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/sqlcheck
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: tools/sqlcheck/package-lock.json
+      - run: npm ci
+      # Baseline drift guard (the *_baseline.sql file must equal SCHEMA.sql), per-file syntax and
+      # plpgsql block balance, the migration rules, then every whole-schema validator (including
+      # fninsertselect) on the concatenation. Offline: libpg-query parses, nothing connects.
+      - run: node run-all.mjs --migrations ../../supabase/migrations --baseline ../../SCHEMA.sql --out "$RUNNER_TEMP/all.sql"
+
+  pgtest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/pgtest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: tools/pgtest/package-lock.json
+      - run: npm ci
+      # SCHEMA.sql plus every migration, applied to an in-process Postgres (PGlite), then the fixtures.
+      - run: node apply.mjs --fixtures fixtures.sql
+      # The fixtures must also load on the baseline alone: they may not depend on any migration.
+      - run: node apply.mjs --files --fixtures fixtures.sql
+      - name: behaviour tests (when the suite exists)
+        run: |
+          if [ -f test.mjs ]; then
+            node test.mjs
+          else
+            echo "tools/pgtest/test.mjs not present yet; skipping"
+          fi
+
+  # OPTIONAL and UNVERIFIED: this job has never been run (there is no Docker on the machine the
+  # tooling was written on), so it is allowed to fail without failing the workflow. It replays the
+  # chain on an EMPTY local Supabase Postgres (supabase start's container, never the v2 project)
+  # and runs plpgsql_check over every function, which catches expression errors inside a balanced
+  # plpgsql body that the offline tools cannot. Only ever `--local`: never link CI to v2, never
+  # `db reset --linked`, never `db push`.
+  sql-apply:
+    runs-on: ubuntu-latest
+    needs: sql-static
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.110.0
+      - run: supabase db start
+      - run: supabase db reset --local
+      - run: supabase db lint --local --level error --fail-on error
+      - if: always()
+        run: supabase stop --no-backup
