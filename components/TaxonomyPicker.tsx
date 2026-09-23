@@ -27,10 +27,10 @@ function Chip({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`rounded-sm px-2 py-0.5 font-mono text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+      className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors disabled:pointer-events-none disabled:opacity-50 ${
         active
-          ? "bg-blueprint-600 text-white"
-          : "border border-line bg-card text-ink/60 hover:border-blueprint-400"
+          ? "border-text bg-text text-surface"
+          : "border-border text-muted hover:text-text"
       }`}
     >
       {label}
@@ -68,14 +68,14 @@ export default function TaxonomyPicker({
   };
 
   const labelCls = compact
-    ? "text-[10px] uppercase tracking-wider text-ink/40"
-    : "block text-xs font-medium text-ink/50 mb-1";
+    ? "text-xs font-medium text-muted"
+    : "mb-1 block text-xs font-medium text-muted";
 
   return (
-    <div className="space-y-1.5">
+    <div className="space-y-3">
       <div>
         <span className={labelCls}>Portfolio</span>
-        <div className="mt-1 flex flex-wrap gap-1">
+        <div className="mt-1 flex flex-wrap gap-2">
           {taxonomy.map((m) => (
             <Chip
               key={m.name}
@@ -91,7 +91,7 @@ export default function TaxonomyPicker({
       {cores.length > 0 && (
         <div>
           <span className={labelCls}>Sector</span>
-          <div className="mt-1 flex flex-wrap gap-1">
+          <div className="mt-1 flex flex-wrap gap-2">
             {cores.map((c) => (
               <Chip
                 key={c.name}
@@ -108,7 +108,7 @@ export default function TaxonomyPicker({
       {subs.length > 0 && (
         <div>
           <span className={labelCls}>Typology</span>
-          <div className="mt-1 flex flex-wrap gap-1">
+          <div className="mt-1 flex flex-wrap gap-2">
             {subs.map((s) => (
               <Chip
                 key={s}

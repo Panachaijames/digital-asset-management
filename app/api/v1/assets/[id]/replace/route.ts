@@ -38,13 +38,17 @@ export async function POST(
     return apiError("bad_request", 'Missing "file" field.', 400);
   }
   const mime = file.type || "";
-  if (!mime.startsWith("image/")) {
+  const isPdf =
+    mime === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+  const isImage = mime.startsWith("image/");
+  if (!isImage && !isPdf) {
     return apiError(
       "bad_request",
-      `Only image uploads are allowed (got "${mime || "unknown"}").`,
+      `Only image and PDF uploads are allowed (got "${mime || "unknown"}").`,
       400
     );
   }
+  const resolvedMime = isPdf ? "application/pdf" : mime;
   if (file.size > MAX_UPLOAD_BYTES) {
     return apiError("bad_request", "File is larger than the 30 MB limit.", 400);
   }
@@ -55,7 +59,7 @@ export async function POST(
     if (!row) return apiError("not_found", "No asset with that id.", 404);
 
     const buffer = Buffer.from(await file.arrayBuffer());
-    const result = await replaceDriveFile(row.drive_file_id, buffer, mime);
+    const result = await replaceDriveFile(row.drive_file_id, buffer, resolvedMime);
 
     const { data, error } = await supabaseAdmin
       .from("common_dam_assets")

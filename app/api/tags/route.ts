@@ -1,29 +1,28 @@
 import { NextResponse } from "next/server";
-import { supabaseAdmin } from "@/lib/supabase";
+import { getTagCounts } from "@/lib/tagCounts";
 
 // GET /api/tags
 // Returns every distinct tag currently in use, with a count, sorted by
-// frequency. Fine at moderate scale (thousands of assets); if this ever
-// gets slow, replace with a Postgres function that does the unnest/count
-// server-side instead of pulling all tag arrays into Node.
+// frequency. Counting reads the tags column of every asset — paginated in
+// countAllTags, because a plain select stops at Supabase's 1000-row cap and
+// silently undercounted at library scale — so it goes through the cache in
+// lib/tagCounts.ts rather than recounting per request. If this ever needs to
+// be exact-to-the-second, replace the counting with a Postgres function that
+// does the unnest/count server-side.
 export async function GET() {
-  const { data, error } = await supabaseAdmin.from("common_dam_assets").select("tags");
-
-  if (error) {
-    console.error("Tag list error:", error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  try {
+    const tags = await getTagCounts();
+    return NextResponse.json(
+      { tags },
+      // The facet list tolerates being a minute out of date; letting the
+      // browser reuse it keeps re-opening Filters instant.
+      { headers: { "Cache-Control": "private, max-age=60" } }
+    );
+  } catch (err) {
+    console.error("Tag list error:", err);
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Could not list tags." },
+      { status: 500 }
+    );
   }
-
-  const counts = new Map<string, number>();
-  for (const row of data ?? []) {
-    for (const tag of row.tags ?? []) {
-      counts.set(tag, (counts.get(tag) ?? 0) + 1);
-    }
-  }
-
-  const tags = Array.from(counts.entries())
-    .sort((a, b) => b[1] - a[1])
-    .map(([tag, count]) => ({ tag, count }));
-
-  return NextResponse.json({ tags });
 }

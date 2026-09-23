@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { primeTaxonomyRowsCache } from "@/components/PresetChips";
 import type { TaxonomyRow } from "@/lib/taxonomy";
 
-// Settings → Tag Settings. The whole tag vocabulary as one editable table:
+// Settings, Taxonomy. The whole tag vocabulary as one editable table:
 // Macro Portfolio → Core Sector → Sub-Sector tags (one row per Core Sector,
 // tags comma-separated). Edits auto-save (debounced whole-set replace via
 // /api/taxonomy); Reset restores the built-in defaults. Tags already applied
@@ -54,7 +54,7 @@ export default function TagSettings() {
     fetch("/api/taxonomy")
       .then((r) => r.json())
       .then((d) => setRows(toEditRows(Array.isArray(d.rows) ? d.rows : [])))
-      .catch(() => setError("Could not load the tag settings."));
+      .catch(() => setError("Could not load the taxonomy."));
   }, []);
 
   const save = useCallback(async () => {
@@ -133,7 +133,7 @@ export default function TagSettings() {
   const reset = async () => {
     if (
       !window.confirm(
-        "Reset ALL tag settings to the built-in defaults?\n\nEvery edit in this table will be discarded. Tags already applied to images are not affected."
+        "Reset the taxonomy to the built-in defaults?\n\nEvery edit in this table will be discarded. Tags already applied to images are not affected."
       )
     )
       return;
@@ -154,13 +154,13 @@ export default function TagSettings() {
   };
 
   const inputCls =
-    "w-full rounded-sm border border-line bg-card px-2.5 py-1.5 text-sm text-ink placeholder:text-ink/30 focus:border-blueprint-400 focus:outline-none";
+    "w-full rounded border border-border bg-surface px-3 py-2 text-sm text-text placeholder:text-muted focus:border-text outline-none transition-colors";
 
   const saveLabel =
     saveState === "saving"
-      ? "Saving…"
+      ? "Saving"
       : saveState === "dirty"
-      ? "Unsaved changes…"
+      ? "Unsaved changes"
       : saveState === "saved"
       ? "All changes saved"
       : saveState === "error"
@@ -169,63 +169,68 @@ export default function TagSettings() {
 
   return (
     <div>
-      <div className="flex items-start justify-between gap-3">
+      {/* Page header — title, one-line description, one action (§5.5). */}
+      <header className="mb-6 flex items-start justify-between gap-4 border-b border-border pb-4">
         <div>
-          <h1 className="font-display text-xl text-ink">Tag Settings</h1>
-          <p className="mt-1 text-sm text-ink/50">
-            Configure preset categories, parent links, and their tags. Edits
-            are auto-saved. Tags already applied to images are never modified.
+          <h1 className="text-lg font-medium text-text">Taxonomy</h1>
+          <p className="mt-1 text-sm text-muted">
+            Portfolios, sectors and the tags they offer. Edits save
+            automatically.
           </p>
         </div>
-        <div className="flex shrink-0 items-center gap-3">
-          {saveLabel && (
-            <span
-              className={`font-mono text-[11px] ${
-                saveState === "error" ? "text-red-400" : "text-ink/40"
-              }`}
-            >
-              {saveLabel}
-            </span>
-          )}
-          <button
-            type="button"
-            onClick={reset}
-            className="rounded-sm border border-line bg-card px-3 py-1.5 text-xs text-ink/60 transition-colors hover:border-blueprint-400 hover:text-ink"
+        <button
+          type="button"
+          onClick={reset}
+          className="inline-flex shrink-0 items-center gap-2 rounded border border-border bg-transparent px-3 py-2 text-sm font-medium text-danger transition-colors hover:border-danger"
+        >
+          Reset taxonomy
+        </button>
+      </header>
+
+      {/* Save state — a status badge, so it sits below the header, not in it. */}
+      {saveLabel && (
+        <div className="mb-4 flex justify-end">
+          <span
+            className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${
+              saveState === "error"
+                ? "border-danger/25 bg-danger/5 text-danger"
+                : "border-accent/25 bg-accent/5 text-text"
+            }`}
           >
-            ↺ Reset
-          </button>
+            {saveLabel}
+          </span>
         </div>
-      </div>
+      )}
 
       {error && (
-        <div className="mt-4 rounded-sm border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+        <div className="mt-4 rounded border border-danger/25 bg-danger/5 px-3 py-2 text-sm text-danger">
           {error}
         </div>
       )}
 
       {!rows && !error && (
-        <p className="mt-5 text-sm text-ink/40">Loading tag settings…</p>
+        <p className="mt-4 text-sm text-muted">Loading taxonomy</p>
       )}
 
       {rows && (
-        <div className="mt-5 overflow-x-auto">
+        <div className="mt-4 overflow-x-auto rounded border border-border bg-surface p-4">
           <div className="min-w-[720px]">
-            {/* Header */}
-            <div className="grid grid-cols-[1fr_1fr_2.4fr_2rem] gap-2 rounded-sm bg-blueprint-600 px-1 py-2">
-              <span className="px-2.5 text-xs font-semibold text-white">
+            {/* Table header */}
+            <div className="grid grid-cols-[1fr_1fr_2.4fr_2rem] gap-2 rounded border-b border-border bg-bg px-1 py-2">
+              <span className="px-3 text-xs font-medium text-muted">
                 Macro Portfolio
               </span>
-              <span className="px-2.5 text-xs font-semibold text-white">
+              <span className="px-3 text-xs font-medium text-muted">
                 Core Sector
               </span>
-              <span className="px-2.5 text-xs font-semibold text-white">
+              <span className="px-3 text-xs font-medium text-muted">
                 Sub-Sector Tags / Typologies
               </span>
               <span />
             </div>
 
             {/* Rows */}
-            <div className="mt-2 space-y-1.5">
+            <div className="mt-2 space-y-2">
               {rows.map((r) => (
                 <div
                   key={r.key}
@@ -256,23 +261,40 @@ export default function TagSettings() {
                     title="Delete row"
                     aria-label={`Delete ${r.macro} / ${r.core}`}
                     onClick={() => deleteRow(r)}
-                    className="justify-self-center text-sm text-red-500/70 hover:text-red-500"
+                    className="justify-self-center text-muted transition-colors hover:text-danger"
                   >
-                    ✕
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      className="h-4 w-4"
+                    >
+                      <path d="M6 6l12 12M18 6L6 18" strokeLinecap="round" />
+                    </svg>
                   </button>
                 </div>
               ))}
             </div>
 
-            <div className="mt-3 flex items-center gap-3 px-1">
+            <div className="mt-4 flex items-center gap-3 px-1">
               <button
                 type="button"
                 onClick={addRow}
-                className="rounded-sm border border-dashed border-line bg-card px-3 py-1.5 text-xs text-ink/60 transition-colors hover:border-blueprint-400 hover:text-ink"
+                className="inline-flex items-center gap-2 rounded border border-border bg-surface px-3 py-2 text-sm font-medium text-text transition-colors hover:bg-bg"
               >
-                + Add row
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  className="h-4 w-4"
+                >
+                  <path d="M12 5v14M5 12h14" strokeLinecap="round" />
+                </svg>
+                Add row
               </button>
-              <span className="text-[11px] text-ink/30">
+              <span className="text-xs text-muted">
                 A row needs both a Macro Portfolio and a Core Sector to be
                 saved.
               </span>

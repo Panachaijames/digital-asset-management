@@ -2,6 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { DriveFolder } from "@/lib/types";
+import {
+  applyRecentFolderChanges,
+  noteCreatedPath,
+} from "@/lib/clientFolderChanges";
 
 interface FolderPickerProps {
   selected: DriveFolder | null;
@@ -94,7 +98,13 @@ export default function FolderPicker({ selected, onSelect }: FolderPickerProps) 
     pathsRequested.current = true;
     fetch("/api/paths")
       .then((r) => r.json())
-      .then((d) => setAllPaths(Array.isArray(d.paths) ? d.paths : []))
+      .then((d) =>
+        // Patched with folders this tab just created/deleted: the response may
+        // be a browser-cached copy from up to a minute ago.
+        setAllPaths(
+          Array.isArray(d.paths) ? applyRecentFolderChanges(d.paths) : []
+        )
+      )
       .catch(() => setAllPaths([]));
   };
 
@@ -167,6 +177,9 @@ export default function FolderPicker({ selected, onSelect }: FolderPickerProps) 
           ? prev
           : [...prev, folder].sort((a, b) => a.name.localeCompare(b.name))
       );
+      // Searchable right away too — here and in the /browse tree.
+      noteCreatedPath(folder.path);
+      setAllPaths((prev) => (prev ? applyRecentFolderChanges(prev) : prev));
       pick(folder);
       setCreatingOpen(false);
       setNewName("");
@@ -187,8 +200,8 @@ export default function FolderPicker({ selected, onSelect }: FolderPickerProps) 
 
   return (
     <div>
-      <label className="block text-sm font-medium text-ink/70 mb-2">
-        Destination folder
+      <label className="mb-2 block text-xs font-medium text-muted">
+        Destination folder in Google Drive
       </label>
 
       {/* Search any folder by name — fastest path to a deep folder */}
@@ -200,17 +213,17 @@ export default function FolderPicker({ selected, onSelect }: FolderPickerProps) 
           setSearch(e.target.value);
           ensurePathsLoaded();
         }}
-        placeholder="Search all folders… (e.g. ProjectX)"
-        className="mb-2 w-full rounded-sm border border-line bg-card px-3 py-2 text-sm outline-none placeholder:text-ink/30 focus:border-blueprint-400"
+        placeholder="Search all folders (e.g. ProjectX)"
+        className="mb-2 w-full rounded border border-border bg-surface px-3 py-2 text-sm text-text outline-none transition-colors placeholder:text-muted focus:border-text"
       />
 
       {search.trim() ? (
-        <div className="mb-2 max-h-48 overflow-y-auto rounded-sm border border-line bg-card">
+        <div className="mb-3 max-h-48 overflow-y-auto rounded border border-border bg-surface">
           {!allPaths && (
-            <p className="px-3 py-2.5 text-sm text-ink/40">Loading folder list…</p>
+            <p className="px-3 py-2 text-sm text-muted">Loading folder list</p>
           )}
           {allPaths && matches.length === 0 && (
-            <p className="px-3 py-2.5 text-sm text-ink/40">
+            <p className="px-3 py-2 text-sm text-muted">
               No folders match &quot;{search.trim()}&quot;.
             </p>
           )}
@@ -225,15 +238,15 @@ export default function FolderPicker({ selected, onSelect }: FolderPickerProps) 
                 onClick={() => void pickByPath(p)}
                 disabled={resolvingPath !== null}
                 title={p}
-                className="flex w-full items-center gap-2 border-b border-line px-3 py-2 text-left last:border-b-0 hover:bg-paper disabled:opacity-50"
+                className="flex w-full items-center gap-2 border-b border-border px-3 py-2 text-left transition-colors last:border-b-0 hover:bg-bg disabled:pointer-events-none disabled:opacity-50"
               >
                 <span className="min-w-0 flex-1 truncate text-sm">
-                  <span className="text-ink">{leaf}</span>
-                  {parent && <span className="text-ink/40"> — {parent}</span>}
+                  <span className="font-medium text-text">{leaf}</span>
+                  {parent && <span className="text-muted"> — {parent}</span>}
                 </span>
                 {resolvingPath === p && (
-                  <span className="shrink-0 font-mono text-[10px] text-blueprint-400">
-                    selecting…
+                  <span className="shrink-0 text-xs font-medium text-accent">
+                    Selecting
                   </span>
                 )}
               </button>
@@ -244,8 +257,8 @@ export default function FolderPicker({ selected, onSelect }: FolderPickerProps) 
         <>
           {/* Recent destinations */}
           {recents.length > 0 && (
-            <div className="mb-2 flex flex-wrap items-center gap-1">
-              <span className="text-[11px] text-ink/40">Recent:</span>
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <span className="text-xs font-medium text-muted">Recent:</span>
               {recents.map((p) => (
                 <button
                   key={p}
@@ -253,9 +266,9 @@ export default function FolderPicker({ selected, onSelect }: FolderPickerProps) 
                   title={p}
                   onClick={() => void pickByPath(p)}
                   disabled={resolvingPath !== null}
-                  className="max-w-[180px] truncate rounded-sm border border-line bg-card px-2 py-0.5 font-mono text-[11px] text-ink/60 hover:border-blueprint-400 hover:text-ink disabled:opacity-50"
+                  className="max-w-[180px] truncate rounded-full border border-border px-3 py-1 text-xs font-medium text-muted transition-colors hover:text-text disabled:pointer-events-none disabled:opacity-50"
                 >
-                  {resolvingPath === p ? "selecting…" : p.split("/").pop()}
+                  {resolvingPath === p ? "Selecting" : p.split("/").pop()}
                 </button>
               ))}
             </div>
@@ -263,19 +276,20 @@ export default function FolderPicker({ selected, onSelect }: FolderPickerProps) 
 
           {/* Selected folder */}
           {selected && (
-            <div className="mb-2 flex items-center gap-2 rounded-sm border border-blueprint-200 bg-blueprint-50 px-3 py-2">
-              <span className="font-mono text-xs text-blueprint-700">
-                Uploading to: {selected.path}
+            <div className="mb-3 flex items-center gap-2 rounded border border-accent/25 bg-accent/5 px-3 py-2">
+              <span className="h-2 w-2 shrink-0 rounded-full bg-accent" />
+              <span className="text-xs font-medium text-text">
+                Destination: {selected.path}
               </span>
             </div>
           )}
 
           {/* Breadcrumbs + actions for the level being browsed */}
-          <div className="mb-2 flex flex-wrap items-center gap-1 font-mono text-xs text-ink/50">
+          <div className="mb-2 flex flex-wrap items-center gap-1 text-xs text-muted">
             <button
               type="button"
               onClick={goToRoot}
-              className="hover:text-blueprint-600 hover:underline"
+              className="transition-colors hover:text-text"
             >
               Shared drives
             </button>
@@ -285,18 +299,18 @@ export default function FolderPicker({ selected, onSelect }: FolderPickerProps) 
                 <button
                   type="button"
                   onClick={() => drillTo(i)}
-                  className="hover:text-blueprint-600 hover:underline"
+                  className="transition-colors hover:text-text"
                 >
                   {f.name}
                 </button>
               </span>
             ))}
             {currentParent && (
-              <span className="ml-auto flex items-center gap-1.5">
+              <span className="ml-auto flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => pick(currentParent)}
-                  className="rounded-sm border border-line px-2 py-0.5 text-[11px] text-ink/70 hover:border-blueprint-400 hover:text-ink"
+                  className="rounded border border-border bg-surface px-2 py-1 text-xs font-medium text-text transition-colors hover:bg-bg"
                 >
                   Upload here
                 </button>
@@ -306,9 +320,9 @@ export default function FolderPicker({ selected, onSelect }: FolderPickerProps) 
                     setCreatingOpen((v) => !v);
                     setNewName("");
                   }}
-                  className="rounded-sm border border-line px-2 py-0.5 text-[11px] text-ink/70 hover:border-blueprint-400 hover:text-ink"
+                  className="rounded border border-border bg-surface px-2 py-1 text-xs font-medium text-text transition-colors hover:bg-bg"
                 >
-                  + New folder
+                  Add folder
                 </button>
               </span>
             )}
@@ -326,30 +340,30 @@ export default function FolderPicker({ selected, onSelect }: FolderPickerProps) 
                   if (e.key === "Enter") void createHere();
                   if (e.key === "Escape") setCreatingOpen(false);
                 }}
-                placeholder={`New folder in ${currentParent.name}…`}
-                className="w-56 rounded-sm border border-line bg-card px-2.5 py-1 text-sm outline-none focus:border-blueprint-400"
+                placeholder={`New folder in ${currentParent.name}`}
+                className="w-56 rounded border border-border bg-surface px-3 py-2 text-sm text-text outline-none transition-colors placeholder:text-muted focus:border-text"
               />
               <button
                 type="button"
                 onClick={() => void createHere()}
                 disabled={createBusy || !newName.trim()}
-                className="rounded-sm bg-blueprint-600 px-3 py-1 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+                className="rounded border border-border bg-surface px-3 py-2 text-sm font-medium text-text transition-colors hover:bg-bg disabled:pointer-events-none disabled:opacity-50"
               >
-                {createBusy ? "Creating…" : "Create & select"}
+                {createBusy ? "Creating" : "Create folder"}
               </button>
             </div>
           )}
 
           {/* Folder list */}
-          <div className="max-h-48 overflow-y-auto rounded-sm border border-line bg-card">
+          <div className="max-h-48 overflow-y-auto rounded border border-border bg-surface p-1">
             {loading && (
-              <p className="px-3 py-2.5 text-sm text-ink/40">Loading folders…</p>
+              <p className="px-2 py-2 text-sm text-muted">Loading folders</p>
             )}
             {!loading && loadError && (
-              <p className="px-3 py-2.5 text-sm text-red-400">{loadError}</p>
+              <p className="px-2 py-2 text-sm text-danger">{loadError}</p>
             )}
             {!loading && !loadError && folders.length === 0 && (
-              <p className="px-3 py-2.5 text-sm text-ink/40">
+              <p className="px-2 py-2 text-sm text-muted">
                 {trail.length === 0
                   ? "No Shared Drives found — add the service account as a member of a Shared Drive."
                   : "No subfolders here — use “Upload here” above to upload into this folder."}
@@ -361,8 +375,8 @@ export default function FolderPicker({ selected, onSelect }: FolderPickerProps) 
                 return (
                   <div
                     key={folder.id}
-                    className={`flex items-center justify-between gap-2 border-b border-line px-3 py-2 last:border-b-0 ${
-                      isSelected ? "bg-blueprint-50" : "hover:bg-paper"
+                    className={`flex items-center justify-between gap-2 rounded px-2 py-2 transition-colors ${
+                      isSelected ? "bg-accent/5" : "hover:bg-bg"
                     }`}
                   >
                     <button
@@ -371,10 +385,10 @@ export default function FolderPicker({ selected, onSelect }: FolderPickerProps) 
                       className="flex min-w-0 flex-1 items-center gap-2 text-left"
                     >
                       <span
-                        className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[10px] leading-none ${
+                        className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-xs leading-none ${
                           isSelected
-                            ? "border-blueprint-600 bg-blueprint-600 text-white"
-                            : "border-line text-transparent"
+                            ? "border-accent bg-accent text-on-accent"
+                            : "border-border text-transparent"
                         }`}
                         aria-hidden
                       >
@@ -382,9 +396,7 @@ export default function FolderPicker({ selected, onSelect }: FolderPickerProps) 
                       </span>
                       <span
                         className={`truncate text-sm ${
-                          isSelected
-                            ? "font-medium text-blueprint-700"
-                            : "text-ink"
+                          isSelected ? "font-medium text-accent" : "text-text"
                         }`}
                       >
                         {folder.name}
@@ -393,10 +405,10 @@ export default function FolderPicker({ selected, onSelect }: FolderPickerProps) 
                     <button
                       type="button"
                       onClick={() => drillInto(folder)}
-                      className="shrink-0 text-xs text-ink/40 hover:text-blueprint-600"
+                      className="shrink-0 text-xs font-medium text-muted transition-colors hover:text-text"
                       aria-label={`Open ${folder.name}`}
                     >
-                      Open →
+                      Open
                     </button>
                   </div>
                 );
@@ -405,11 +417,11 @@ export default function FolderPicker({ selected, onSelect }: FolderPickerProps) 
         </>
       )}
 
-      {pickError && <p className="mt-1.5 text-xs text-red-400">{pickError}</p>}
-      <p className="mt-1.5 text-xs text-ink/40">
-        Search above, click a recent chip, or browse: click a folder to select
-        it · &quot;Open →&quot; goes inside · &quot;Upload here&quot; picks the
-        folder you&apos;re viewing.
+      {pickError && <p className="mt-2 text-xs text-danger">{pickError}</p>}
+      <p className="mt-2 text-xs text-muted">
+        Search above, pick a recent folder, or browse: click a folder to select
+        it, Open goes inside it, and Upload here picks the folder you are
+        viewing.
       </p>
     </div>
   );

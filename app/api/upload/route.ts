@@ -4,6 +4,7 @@ import { clearFolderPathCache } from "@/lib/drivePaths";
 import { supabaseAdmin } from "@/lib/supabase";
 import { deriveSelectionFromTags, normalizeTags } from "@/lib/taxonomy";
 import { getTaxonomyTree } from "@/lib/taxonomyStore";
+import { clearTagCountCache } from "@/lib/tagCounts";
 
 export const runtime = "nodejs";
 
@@ -194,6 +195,9 @@ export async function POST(request: NextRequest) {
     // — drop the cached folder tree so the browse page shows them right away
     // instead of only after the 60 s cache expires.
     if (folderCache.size > 0) clearFolderPathCache();
+
+    // Tag counts changed — drop the cached facet list.
+    clearTagCountCache();
 
     return NextResponse.json({ results, failures });
   } catch (error) {

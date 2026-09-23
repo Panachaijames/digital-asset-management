@@ -6,7 +6,7 @@ import type { DriveFolder } from "@/lib/types";
 
 // Import → register files that are ALREADY in Google Drive (e.g. bulk-synced
 // with Drive for desktop during the Filecamp migration) as DAM assets.
-// Nothing is moved or uploaded — a scan finds image/video files under a
+// Nothing is moved or uploaded — a scan finds image/video/PDF files under a
 // folder with no metadata row yet, and importing writes those rows in
 // batches.
 
@@ -88,6 +88,9 @@ const EMPTY_PROGRESS: ImportProgress = {
   foldersPending: 0,
 };
 
+import { useAutoTag, type RecentTaggedAsset } from "@/components/AutoTagContext";
+export type { RecentTaggedAsset };
+
 export default function DriveImport() {
   const [folder, setFolder] = useState<DriveFolder | null>(null);
   const [scanning, setScanning] = useState(false);
@@ -100,22 +103,18 @@ export default function DriveImport() {
   // scan/import loop from a previous selection stops touching state.
   const runRef = useRef(0);
 
-  const [autoTagStats, setAutoTagStats] = useState<{
-    total: number;
-    totalImages: number;
-    untaggedCount: number;
-  } | null>(null);
-  const [autoTagging, setAutoTagging] = useState(false);
-  const [autoTagProgress, setAutoTagProgress] = useState({
-    done: 0,
-    total: 0,
-    tagged: 0,
-    failed: 0,
-  });
-  const [autoTagError, setAutoTagError] = useState("");
-  const [autoTagFailures, setAutoTagFailures] = useState<
-    { id: string; name: string; error: string }[]
-  >([]);
+  const {
+    job: autoTagJob,
+    isRunning: autoTagging,
+    isPaused: autoTagPaused,
+    stats: autoTagStats,
+    fetchStats,
+    startAutoTag,
+    pauseAutoTag,
+    resumeAutoTag,
+    resetAutoTag,
+  } = useAutoTag();
+
   const [autoLoopImport, setAutoLoopImport] = useState(true);
   const [autoTagAfterImport, setAutoTagAfterImport] = useState(true);
 
@@ -151,35 +150,18 @@ export default function DriveImport() {
     };
   }, [busy]);
 
-  // Fetch untagged asset stats whenever folder selection changes
-  const fetchStats = async (folderPath = folder?.path || "") => {
-    try {
-      const url = folderPath
-        ? `/api/autotag?folderPath=${encodeURIComponent(folderPath)}`
-        : "/api/autotag";
-      const res = await fetch(url);
-      const data = await res.json();
-      if (res.ok) setAutoTagStats(data);
-    } catch {
-      // Ignore background stats fetch errors
-    }
-  };
-
   useEffect(() => {
-    void fetchStats();
-  }, [folder]);
+    void fetchStats(folder?.path || "");
+  }, [folder, fetchStats]);
 
   const pickFolder = (f: DriveFolder | null) => {
-    runRef.current++; // abandon any in-flight scan/import/auto-tag loop
+    runRef.current++; // abandon any in-flight scan/import loop
     setFolder(f);
     setScan(null);
     setScanning(false);
     setImporting(false);
-    setAutoTagging(false);
     setOutcome(null);
     setError("");
-    setAutoTagError("");
-    setAutoTagFailures([]);
   };
 
   // One scan round with client-side retries — a single transient hiccup must
@@ -255,197 +237,7 @@ export default function DriveImport() {
     }
   };
 
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-  // One auto-tag batch, retried STUBBORNLY. Cloud Logging showed runs dying
-  // with the server perfectly healthy: the browser's next POST simply never
-  // arrived (laptop wifi/VPN blip mid-marathon), and a ~10 s retry window
-  // couldn't ride it out. Network-level failures now retry for up to 15
-  // minutes with a visible countdown-ish status; server errors get a few
-  // bounded retries; AI-disabled (no API key) is fatal immediately. The ID
-  // queue makes retries safe — anything the server already tagged is skipped.
-  const postAutoTagBatch = async (body: {
-    assetIds: string[];
-    limit: number;
-    folderPath: string;
-  }): Promise<{
-    processed: number;
-    tagged: number;
-    failed: number;
-    results: { id: string; name?: string; status?: string; error?: string }[];
-  }> => {
-    const startedAt = Date.now();
-    const RETRY_WINDOW_MS = 15 * 60 * 1000;
-    const MAX_SERVER_ERRORS = 5;
-    let serverErrors = 0;
-
-    for (let attempt = 1; ; attempt++) {
-      let failure: { message: string; server: boolean };
-      try {
-        const res = await fetch("/api/autotag", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (res.ok) {
-          if (attempt > 1) setAutoTagError(""); // clear the "retrying…" status
-          return data;
-        }
-        if (data.disabled) {
-          throw Object.assign(
-            new Error(data.error || "Gemini API key is not configured."),
-            { fatal: true }
-          );
-        }
-        failure = {
-          message: data.error || `Auto-tagging batch failed (HTTP ${res.status}).`,
-          server: true,
-        };
-      } catch (e) {
-        if ((e as { fatal?: boolean }).fatal) throw e;
-        failure = {
-          message: e instanceof Error ? e.message : "Auto-tagging batch failed.",
-          server: false,
-        };
-      }
-
-      if (failure.server && ++serverErrors >= MAX_SERVER_ERRORS) {
-        throw new Error(failure.message);
-      }
-      if (Date.now() - startedAt > RETRY_WINDOW_MS) {
-        throw new Error(failure.message);
-      }
-      setAutoTagError(
-        `${failure.server ? "Server hiccup" : "Connection lost"} — retrying automatically (attempt ${attempt})… tagging resumes by itself, nothing is lost.`
-      );
-      await sleep(Math.min(30_000, 3_000 * attempt));
-    }
-  };
-
-  const runAutoTag = async (targetPath = folder?.path || "") => {
-    const runId = ++runRef.current;
-    setAutoTagging(true);
-    setAutoTagError("");
-    setAutoTagFailures([]);
-
-    try {
-      // Snapshot the untagged asset IDs once, then work through them in small
-      // batches — no re-deriving "what's untagged" per batch, and a retried
-      // or partially-processed batch resumes exactly where it stopped.
-      const statsUrl = targetPath
-        ? `/api/autotag?folderPath=${encodeURIComponent(targetPath)}&includeIds=1`
-        : "/api/autotag?includeIds=1";
-      let statsData: {
-        error?: string;
-        total?: number;
-        totalImages?: number;
-        untaggedCount?: number;
-        untaggedIds?: string[];
-      } = {};
-      for (let attempt = 1; ; attempt++) {
-        try {
-          const statsRes = await fetch(statsUrl);
-          statsData = await statsRes.json();
-          if (!statsRes.ok) {
-            throw new Error(
-              statsData.error || "Could not fetch untagged assets."
-            );
-          }
-          break;
-        } catch (e) {
-          if (attempt >= 3) throw e;
-          await sleep(2_000 * attempt);
-        }
-      }
-
-      let queue: string[] = Array.isArray(statsData.untaggedIds)
-        ? statsData.untaggedIds
-        : [];
-      const initialTotal = queue.length;
-
-      if (initialTotal === 0) {
-        setAutoTagStats({
-          total: statsData.total || 0,
-          totalImages: statsData.totalImages || 0,
-          untaggedCount: statsData.untaggedCount || 0,
-        });
-        return;
-      }
-
-      setAutoTagProgress({ done: 0, total: initialTotal, tagged: 0, failed: 0 });
-
-      let done = 0;
-      let totalTagged = 0;
-      let totalFailed = 0;
-
-      while (queue.length > 0) {
-        if (runRef.current !== runId) return;
-        const batchIds = queue.slice(0, 20);
-        const data = await postAutoTagBatch({
-          assetIds: batchIds,
-          limit: batchIds.length,
-          folderPath: targetPath,
-        });
-        if (runRef.current !== runId) return;
-
-        const results = Array.isArray(data.results) ? data.results : [];
-        const processedIds = new Set(results.map((r) => r.id));
-
-        if (processedIds.size === 0) {
-          // Nothing in this batch needed tagging (e.g. tagged since the
-          // snapshot) — drop it so the loop always makes progress.
-          queue = queue.slice(batchIds.length);
-          done += batchIds.length;
-        } else {
-          // The server may stop mid-batch on its time budget — only IDs it
-          // reported leave the queue; the rest go into the next batch.
-          queue = queue.filter((id) => !processedIds.has(id));
-          done += processedIds.size;
-        }
-
-        totalTagged += data.tagged || 0;
-        totalFailed += data.failed || 0;
-
-        const newFailures = results
-          .filter((r) => r.status === "failed")
-          .map((r) => ({
-            id: r.id,
-            name: r.name || "Unnamed Asset",
-            error: r.error || "Classification failed",
-          }));
-        if (newFailures.length > 0) {
-          setAutoTagFailures((prev) => [...prev, ...newFailures]);
-        }
-
-        setAutoTagProgress({
-          done: Math.min(done, initialTotal),
-          total: initialTotal,
-          tagged: totalTagged,
-          failed: totalFailed,
-        });
-      }
-
-      if (totalFailed > 0) {
-        setAutoTagError(
-          `${totalTagged} image${totalTagged === 1 ? "" : "s"} tagged. ${totalFailed} could not be classified and were skipped.`
-        );
-      }
-
-      await fetchStats(targetPath);
-    } catch (e) {
-      if (runRef.current !== runId) return;
-      const msg = e instanceof Error ? e.message : "Auto-tagging failed.";
-      // Every tag is written per image, so a dead run loses nothing — make
-      // sure the user knows one click picks up exactly where it stopped.
-      setAutoTagError(
-        `${msg} Progress is saved per image — click the Auto-Tag button to resume where it left off.`
-      );
-      void fetchStats(targetPath); // refresh the button's remaining count
-    } finally {
-      if (runRef.current === runId) setAutoTagging(false);
-    }
-  };
 
   const runImport = async (overrideLoop?: boolean) => {
     if (!folder || !scan) return;
@@ -550,115 +342,116 @@ export default function DriveImport() {
     }
 
     if (kickAutoTag && runRef.current === runId) {
-      void runAutoTag(folder.path);
+      void startAutoTag({
+        folderPath: folder.path,
+        reTagAll: false,
+        folderName: folder.path,
+      });
     }
   };
 
   return (
-    <div className="mx-auto max-w-3xl px-6 py-10">
-      <header className="mb-8">
-        <h1 className="font-display text-2xl italic text-ink">
-          Import from Drive
-        </h1>
-        <p className="mt-1.5 text-sm text-ink/60">
-          Registers images and videos that are <em>already</em> in Google
-          Drive (for example bulk-copied with Drive for desktop) so they
-          appear in the DAM. Nothing is moved or re-uploaded. Folder names map
-          to taxonomy tags, and you can run AI auto-tagging on untagged images below.
-        </p>
-      </header>
+    <div className="px-8 py-8 pb-12">
+      {/* Header — title, description, no extra chrome (§5.5) */}
+      <div className="mb-6 flex items-start justify-between border-b border-border pb-4">
+        <div>
+          <h1 className="text-lg font-medium text-text">Import</h1>
+          <p className="mt-1 text-sm text-muted">
+            Registers images and videos already in Google Drive so they
+            appear in the DAM, without moving or re-uploading them.
+          </p>
+        </div>
+      </div>
 
       <FolderPicker selected={folder} onSelect={pickFolder} />
 
-      <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
+      <div className="mt-6 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <button
             type="button"
             onClick={() => void runScan()}
             disabled={!folder || scanning || importing || autoTagging}
-            className="rounded-sm bg-blueprint-600 px-5 py-2.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-30"
+            className="btn-primary-dark"
           >
-            {scanning ? "Scanning…" : "Scan folder"}
+            {scanning ? "Scanning" : "Scan folder"}
           </button>
           {!folder && (
-            <span className="text-xs text-ink/40">
+            <span className="text-sm text-muted">
               Select the folder to scan first
             </span>
           )}
           {scanning && (
-            <span className="text-xs text-ink/40">
+            <span className="text-sm text-muted">
               {scan
-                ? `Walking the tree… ${scan.foldersScanned} folders scanned · ${scan.foldersPending} queued · ${scan.candidatesTotal} files to import found`
-                : "Walking the folder tree…"}
+                ? `Walking the tree — ${scan.foldersScanned} folders scanned · ${scan.foldersPending} queued · ${scan.candidatesTotal} files to import found`
+                : "Walking the folder tree"}
             </span>
           )}
         </div>
 
-        <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-4">
-          <label className="flex cursor-pointer items-center gap-2 text-xs text-ink/70">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-muted">
             <input
               type="checkbox"
               checked={autoLoopImport}
               onChange={(e) => setAutoLoopImport(e.target.checked)}
-              className="rounded-sm border-line text-blueprint-600 focus:ring-blueprint-500"
+              className="accent-accent"
             />
             Auto-loop import until complete
           </label>
 
-          <label className="flex cursor-pointer items-center gap-2 text-xs text-ink/70">
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-muted">
             <input
               type="checkbox"
               checked={autoTagAfterImport}
               onChange={(e) => setAutoTagAfterImport(e.target.checked)}
-              className="rounded-sm border-line text-blueprint-600 focus:ring-blueprint-500"
+              className="accent-accent"
             />
-            Automatically run AI auto-tagging
+            Run auto-tagging after import
           </label>
         </div>
       </div>
 
       {error && (
-        <p className="mt-4 rounded-sm bg-red-500/10 px-3 py-2 text-sm text-red-400">
+        <p className="mt-4 rounded border border-danger/25 bg-danger/5 px-3 py-2 text-sm text-danger">
           {error}
         </p>
       )}
 
       {/* Scan summary */}
       {scan && (
-        <div className="mt-6 rounded-sm border border-line bg-panel/60 p-4">
-          <p className="font-mono text-[10px] uppercase tracking-wider text-blueprint-400">
-            Scan result
-          </p>
-          <p className="mt-2 text-sm text-ink/80">
+        <div className="mt-6 rounded border border-border bg-surface p-4">
+          <h2 className="mb-3 text-sm font-medium text-text">Scan result</h2>
+          <p className="text-sm text-text">
             {scan.total} media file{scan.total === 1 ? "" : "s"} seen
             {scan.cursor ? " so far" : ""} under{" "}
-            <span className="font-mono text-xs">{folder?.path}</span> —{" "}
+            <span className="text-muted">{folder?.path}</span> —{" "}
             {scan.registered} already in the DAM,{" "}
-            <strong className="text-ink">
+            <strong className="text-text">
               {scan.candidatesTotal} to import
             </strong>
             .
           </p>
           {scan.cursor && (
-            <p className="mt-1.5 text-xs text-ink/50">
+            <p className="mt-2 text-sm text-muted">
               Big folder — {scan.foldersScanned} folders walked,{" "}
               {scan.foldersPending} still queued (nested folders included).{" "}
               {autoLoopImport
-                ? "Import All keeps scanning deeper and importing until everything is done."
+                ? "Import all keeps scanning deeper and importing until everything is done."
                 : `This batch holds ${scan.candidates.length} files.`}
             </p>
           )}
           {(scan.candidatesTotal > 0 || scan.cursor) && (
-            <div className="mt-3 flex flex-wrap items-center gap-3">
+            <div className="mt-4 flex flex-wrap items-center gap-3">
               <button
                 type="button"
                 onClick={() => void runImport(true)}
                 disabled={importing || scanning || autoTagging}
-                className="rounded-sm bg-blueprint-600 px-5 py-2.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-30"
+                className="inline-flex items-center gap-2 rounded bg-accent px-3 py-2 text-sm font-medium text-on-accent transition-opacity hover:opacity-90 disabled:pointer-events-none disabled:opacity-50"
               >
                 {importing
-                  ? "Importing in loop…"
-                  : `Import All ${scan.candidatesTotal}${scan.cursor ? "+" : ""} Files (Auto-Loop)`}
+                  ? "Importing"
+                  : `Import all ${scan.candidatesTotal}${scan.cursor ? "+" : ""} files`}
               </button>
 
               {scan.cursor && scan.candidates.length > 0 && (
@@ -666,9 +459,9 @@ export default function DriveImport() {
                   type="button"
                   onClick={() => void runImport(false)}
                   disabled={importing || scanning || autoTagging}
-                  className="rounded-sm border border-line bg-card px-4 py-2.5 text-sm font-medium text-ink/80 transition-colors hover:bg-panel disabled:cursor-not-allowed disabled:opacity-30"
+                  className="inline-flex items-center gap-2 rounded border border-border bg-surface px-3 py-2 text-sm font-medium text-text transition-colors hover:bg-bg disabled:pointer-events-none disabled:opacity-50"
                 >
-                  Import Batch ({scan.candidates.length} files)
+                  Import batch ({scan.candidates.length} files)
                 </button>
               )}
             </div>
@@ -676,14 +469,12 @@ export default function DriveImport() {
         </div>
       )}
 
-      {/* Import Progress */}
+      {/* Import progress */}
       {importing && (
         <div className="mt-6">
-          <div className="h-1.5 w-full overflow-hidden rounded-full bg-line">
+          <div className="h-1 w-full overflow-hidden rounded-full bg-border">
             <div
-              className={`h-full bg-blueprint-600 transition-all duration-150 ${
-                progress.roundTotal === 0 ? "animate-pulse" : ""
-              }`}
+              className="h-full rounded-full bg-accent transition-all duration-150"
               style={{
                 width: `${
                   progress.roundTotal > 0
@@ -695,10 +486,10 @@ export default function DriveImport() {
               }}
             />
           </div>
-          <p className="mt-1.5 text-xs text-ink/40">
+          <p className="mt-2 text-sm text-muted">
             {progress.roundTotal > 0
-              ? `Registering batch… ${progress.roundDone} / ${progress.roundTotal}`
-              : "Scanning deeper for the next batch…"}
+              ? `Registering batch — ${progress.roundDone} / ${progress.roundTotal}`
+              : "Scanning deeper for the next batch"}
             {" · "}
             {progress.imported} imported
             {progress.skipped > 0 && `, ${progress.skipped} skipped`}
@@ -711,7 +502,7 @@ export default function DriveImport() {
 
       {/* Outcome */}
       {outcome && (
-        <div className="mt-6 rounded-sm bg-blueprint-50 px-4 py-3 text-sm text-blueprint-700">
+        <div className="mt-6 rounded border border-accent/25 bg-accent/5 px-4 py-3 text-sm text-text">
           <p>
             Imported {outcome.imported} file
             {outcome.imported === 1 ? "" : "s"}.
@@ -726,7 +517,7 @@ export default function DriveImport() {
               <button
                 type="button"
                 onClick={() => void runScan(true)}
-                className="underline hover:opacity-80"
+                className="font-medium text-accent underline hover:opacity-90"
               >
                 continue scanning
               </button>{" "}
@@ -737,90 +528,169 @@ export default function DriveImport() {
       )}
 
       {outcome && outcome.failures.length > 0 && (
-        <div className="mt-4 rounded-sm border border-line bg-card p-3">
-          <p className="mb-2 font-mono text-[10px] uppercase tracking-wider text-ink/40">
+        <div className="mt-4 rounded border border-border bg-surface p-4">
+          <h2 className="mb-3 text-sm font-medium text-text">
             Failures (first {Math.min(outcome.failures.length, 20)})
-          </p>
+          </h2>
           <ul className="space-y-1">
             {outcome.failures.slice(0, 20).map((f) => (
-              <li key={f.id} className="text-xs text-red-400">
-                <span className="font-mono">{f.name}</span> — {f.error}
+              <li key={f.id} className="text-sm text-danger">
+                <span className="font-medium">{f.name}</span> — {f.error}
               </li>
             ))}
           </ul>
         </div>
       )}
 
-      {/* AI Auto-Tagging Section */}
-      <div className="mt-10 rounded-sm border border-line/80 bg-panel p-5">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-base font-medium text-ink">
-              AI Auto-Tag Untagged Assets
-            </h2>
-            <p className="mt-0.5 text-xs text-ink/60">
-              Scans imported images in <span className="font-mono text-xs">{folder?.path || "dwp.dam"}</span> that have no tags or sector taxonomy, downloads them from Google Drive, and classifies them using Gemini Vision AI.
+      {/* Auto-tagging */}
+      <div className="mt-6 rounded border border-border bg-surface p-4">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="max-w-2xl">
+            <div className="flex items-center gap-2">
+              <span className="flex h-6 w-6 items-center justify-center rounded bg-accent/5 text-accent">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-4 w-4">
+                  <path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3L12 3z" strokeLinejoin="round" />
+                </svg>
+              </span>
+              <h2 className="flex items-center gap-2 text-sm font-medium text-text">
+                <span>Auto-tagging</span>
+                {autoTagging && (
+                  <span className="badge-status">Running in background</span>
+                )}
+                {autoTagPaused && (
+                  <span className="badge-status">Paused, progress saved</span>
+                )}
+              </h2>
+            </div>
+            <p className="mt-1 text-sm text-muted">
+              Scans images in <span className="font-medium text-text">{folder?.path || "the entire DAM Drive"}</span>, analyses them with Gemini Vision, and adds materials, space types and style keywords. Runs in the background and saves progress across pages.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => void runAutoTag(folder?.path || "")}
-            disabled={
-              autoTagging ||
-              importing ||
-              scanning ||
-              (autoTagStats !== null && autoTagStats.untaggedCount === 0)
-            }
-            className="rounded-sm bg-blueprint-600 px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-30 shrink-0 ml-4"
-          >
-            {autoTagging
-              ? "Auto-Tagging…"
-              : `Auto-Tag ${
-                  autoTagStats?.untaggedCount
-                    ? `${autoTagStats.untaggedCount} Image${autoTagStats.untaggedCount === 1 ? "" : "s"}`
-                    : "Untagged Images"
-                }`}
-          </button>
+
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            {autoTagging ? (
+              <button
+                type="button"
+                onClick={() => pauseAutoTag()}
+                className="inline-flex items-center gap-2 rounded border border-border bg-transparent px-3 py-2 text-sm font-medium text-danger transition-colors hover:border-danger"
+              >
+                Stop tagging
+              </button>
+            ) : autoTagPaused ? (
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => resumeAutoTag()}
+                  className="inline-flex items-center gap-2 rounded border border-border bg-surface px-3 py-2 text-sm font-medium text-text transition-colors hover:bg-bg"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-4 w-4">
+                    <polygon points="5 3 19 12 5 21 5 3" strokeLinejoin="round" />
+                  </svg>
+                  <span>
+                    Resume tagging ({autoTagJob?.done.toLocaleString()} / {autoTagJob?.total.toLocaleString()})
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => resetAutoTag()}
+                  title="Discard the saved progress and start a new run"
+                  className="inline-flex items-center gap-2 rounded border border-border bg-surface px-3 py-2 text-sm font-medium text-text transition-colors hover:bg-bg"
+                >
+                  Reset progress
+                </button>
+              </div>
+            ) : (
+              <>
+                {/* Re-tag every image already in the drive */}
+                <button
+                  type="button"
+                  onClick={() =>
+                    void startAutoTag({
+                      folderPath: folder?.path || "",
+                      reTagAll: true,
+                      folderName: folder?.path || "the entire DAM Drive",
+                    })
+                  }
+                  disabled={importing || scanning || (autoTagStats !== null && autoTagStats.totalImages === 0)}
+                  title="Re-tags every image already in the drive with Gemini Vision"
+                  className="inline-flex items-center gap-2 rounded border border-border bg-surface px-3 py-2 text-sm font-medium text-text transition-colors hover:bg-bg disabled:pointer-events-none disabled:opacity-50"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-4 w-4">
+                    <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                    <path d="M3 3v5h5" />
+                    <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+                    <path d="M16 21h5v-5" />
+                  </svg>
+                  <span>
+                    Re-tag all photos ({autoTagStats?.totalImages ? autoTagStats.totalImages.toLocaleString() : "34,233"})
+                  </span>
+                </button>
+
+                {/* Tag the untagged only */}
+                {Boolean(autoTagStats?.untaggedCount && autoTagStats.untaggedCount > 0) && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void startAutoTag({
+                        folderPath: folder?.path || "",
+                        reTagAll: false,
+                        folderName: folder?.path || "the entire DAM Drive",
+                      })
+                    }
+                    disabled={importing || scanning}
+                    className="inline-flex items-center gap-2 rounded border border-border bg-surface px-3 py-2 text-sm font-medium text-text transition-colors hover:bg-bg disabled:pointer-events-none disabled:opacity-50"
+                  >
+                    Tag untagged only ({autoTagStats?.untaggedCount?.toLocaleString()})
+                  </button>
+                )}
+              </>
+            )}
+          </div>
         </div>
 
         {autoTagStats !== null && (
-          <div className="mt-3 text-xs text-ink/60">
-            {autoTagStats.untaggedCount === 0 ? (
-              <span className="text-emerald-600 font-medium">
-                ✓ All {autoTagStats.totalImages} images in this scope have tags & taxonomy.
+          <div className="mt-3 text-sm text-muted">
+            Found <strong className="text-text">{autoTagStats.totalImages.toLocaleString()}</strong> total image assets in {folder?.path ? "this folder" : "dwp.dam"}.
+            {autoTagStats.untaggedCount > 0 ? (
+              <span className="ml-1 font-medium text-accent">
+                ({autoTagStats.untaggedCount.toLocaleString()} untagged, {(autoTagStats.totalImages - autoTagStats.untaggedCount).toLocaleString()} already tagged)
               </span>
             ) : (
-              <span>
-                Found <strong className="text-ink">{autoTagStats.untaggedCount}</strong> untagged image{autoTagStats.untaggedCount === 1 ? "" : "s"} out of {autoTagStats.totalImages} image assets in {folder?.path ? "this folder" : "dwp.dam"}.
-                {autoTagStats.totalImages > autoTagStats.untaggedCount && (
-                  <span className="text-emerald-500 font-medium ml-1.5">
-                    ({autoTagStats.totalImages - autoTagStats.untaggedCount} already tagged)
-                  </span>
-                )}
+              <span className="ml-1 font-medium text-muted">
+                (All {autoTagStats.totalImages.toLocaleString()} indexed)
               </span>
             )}
           </div>
         )}
 
-        {autoTagError && (
-          <p className="mt-3 rounded-sm bg-red-500/10 px-3 py-2 text-xs text-red-400">
-            {autoTagError}
-          </p>
+        {autoTagJob?.error && (
+          <div className="mt-3 flex items-center justify-between gap-2 rounded border border-border bg-bg px-3 py-2 text-sm text-text">
+            <span>{autoTagJob.error}</span>
+            {autoTagPaused && (
+              <button
+                type="button"
+                onClick={() => resumeAutoTag()}
+                className="shrink-0 text-sm font-medium text-accent underline hover:opacity-90"
+              >
+                Resume now
+              </button>
+            )}
+          </div>
         )}
 
-        {/* Auto-Tagging Progress */}
-        {autoTagging && (
+        {/* Auto-tagging progress */}
+        {autoTagJob && autoTagJob.total > 0 && (autoTagging || autoTagPaused || autoTagJob.status === "completed") && (
           <div className="mt-4">
-            <div className="h-1.5 w-full overflow-hidden rounded-full bg-line">
+            <div className="h-1 w-full overflow-hidden rounded-full bg-border">
               <div
-                className="h-full bg-blueprint-600 transition-all duration-200"
+                className="h-full rounded-full bg-accent transition-all duration-300"
                 style={{
                   width: `${
-                    autoTagProgress.total > 0
+                    autoTagJob.total > 0
                       ? Math.min(
                           100,
                           Math.round(
-                            (autoTagProgress.done / autoTagProgress.total) * 100
+                            (autoTagJob.done / autoTagJob.total) * 100
                           )
                         )
                       : 0
@@ -828,33 +698,166 @@ export default function DriveImport() {
                 }}
               />
             </div>
-            <div className="mt-1.5 flex justify-between text-xs text-ink/50 font-mono">
-              <span>
-                Processing with Gemini Vision… {autoTagProgress.done} / {autoTagProgress.total}
+            <div className="mt-2 flex items-center justify-between text-xs text-muted">
+              <span className="flex items-center gap-2 font-medium text-text">
+                {autoTagging && (
+                  <span className="h-2 w-2 rounded-full bg-accent" />
+                )}
+                <span>
+                  {autoTagJob.done.toLocaleString()} / {autoTagJob.total.toLocaleString()} photos ({autoTagJob.total > 0 ? Math.round((autoTagJob.done / autoTagJob.total) * 100) : 0}%)
+                </span>
+                <span className="text-xs text-muted">
+                  in {autoTagJob.targetName}
+                </span>
               </span>
-              <span>
-                {autoTagProgress.tagged} tagged, {autoTagProgress.failed} failed
+              <span className="text-muted">
+                <strong className="text-text">{autoTagJob.tagged.toLocaleString()}</strong> tagged · <strong className="text-danger">{autoTagJob.failed}</strong> failed
               </span>
             </div>
           </div>
         )}
 
-        {/* Auto-Tagging Failures List */}
-        {autoTagFailures.length > 0 && (
-          <div className="mt-4 rounded-sm border border-line bg-card p-3">
-            <p className="mb-2 font-mono text-[10px] uppercase tracking-wider text-ink/40">
-              Auto-Tagging Failures ({autoTagFailures.length})
-            </p>
-            <ul className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
-              {autoTagFailures.map((f, i) => (
+        {/* Currently tagging */}
+        {(autoTagging && autoTagJob?.currentlyTagging) && (
+          <div className="mt-4 flex items-center gap-3 rounded border border-accent/25 bg-accent/5 p-4">
+            {autoTagJob.currentlyTagging.driveFileId ? (
+              <img
+                src={`/api/thumbnail?id=${autoTagJob.currentlyTagging.driveFileId}&size=320`}
+                alt={autoTagJob.currentlyTagging.name || "Tagging photo"}
+                className="h-12 w-12 shrink-0 rounded border border-border bg-bg object-cover"
+                onError={(e) => {
+                  (e.currentTarget as HTMLElement).style.display = "none";
+                }}
+              />
+            ) : (
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded bg-bg text-muted">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-4 w-4">
+                  <rect width="18" height="18" x="3" y="3" rx="2" ry="2" />
+                  <circle cx="9" cy="9" r="2" />
+                  <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+                </svg>
+              </div>
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <span className="flex h-2 w-2 shrink-0 rounded-full bg-accent" />
+                <span className="text-xs font-medium text-muted">
+                  Tagging with Gemini Vision
+                </span>
+              </div>
+              <p className="mt-1 truncate text-sm font-medium text-text">
+                {autoTagJob.currentlyTagging.name || "Processing photo"}
+              </p>
+              <p className="mt-1 flex items-center gap-1 truncate text-xs text-muted" title={autoTagJob.currentlyTagging.folderPath}>
+                <span className="font-medium text-muted">{autoTagJob.currentlyTagging.folderPath || "Root Drive"}</span>
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Recently tagged */}
+        {(autoTagJob?.recentTagged && autoTagJob.recentTagged.length > 0) && (
+          <div className="mt-6 rounded border border-border bg-surface p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="flex items-center gap-2 text-sm font-medium text-text">
+                <span className={`inline-block h-2 w-2 rounded-full ${autoTagging ? "bg-accent" : "bg-border"}`} />
+                Recently tagged ({autoTagJob.recentTagged.length})
+              </h3>
+              {autoTagging && (
+                <span className="text-xs text-muted">
+                  Updating live, safe to navigate away or close
+                </span>
+              )}
+            </div>
+
+            <div className="grid max-h-96 grid-cols-1 gap-4 overflow-y-auto pr-1 sm:grid-cols-2">
+              {autoTagJob.recentTagged.map((item) => (
+                <div
+                  key={item.id}
+                  className="flex gap-3 rounded border border-border bg-surface p-2 transition-colors hover:border-text"
+                >
+                  {item.driveFileId ? (
+                    <img
+                      src={`/api/thumbnail?id=${item.driveFileId}&size=320`}
+                      alt={item.name}
+                      className="h-12 w-12 shrink-0 rounded border border-border bg-bg object-cover"
+                      onError={(e) => {
+                        (e.currentTarget as HTMLElement).style.display = "none";
+                      }}
+                    />
+                  ) : (
+                    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded bg-bg text-muted">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-4 w-4">
+                        <rect width="18" height="18" x="3" y="3" rx="2" ry="2" />
+                        <circle cx="9" cy="9" r="2" />
+                        <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+                      </svg>
+                    </div>
+                  )}
+
+                  <div className="flex min-w-0 flex-1 flex-col justify-between">
+                    <div>
+                      <div className="flex items-start justify-between gap-1">
+                        <span className="truncate text-sm font-medium text-text" title={item.name}>
+                          {item.name}
+                        </span>
+                        <span className="shrink-0 text-xs text-muted">
+                          Tagged
+                        </span>
+                      </div>
+                      <p className="truncate text-xs text-muted" title={item.folderPath}>
+                        {item.folderPath || "Root"}
+                      </p>
+                    </div>
+
+                    <div className="mt-2 flex flex-wrap items-center gap-1">
+                      {item.macro && (
+                        <span className="badge-status">
+                          {item.macro}
+                        </span>
+                      )}
+                      {item.spaceType && (
+                        <span className="badge-status">
+                          {item.spaceType}
+                        </span>
+                      )}
+                      {(item.tags || []).slice(0, 4).map((t, idx) => (
+                        <span
+                          key={`${item.id}-tag-${idx}`}
+                          className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-xs text-muted"
+                        >
+                          {t}
+                        </span>
+                      ))}
+                      {(item.tags?.length || 0) > 4 && (
+                        <span className="text-xs text-muted">
+                          +{(item.tags?.length || 0) - 4} more
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Auto-tagging failures */}
+        {(autoTagJob?.failures && autoTagJob.failures.length > 0) && (
+          <div className="mt-4 rounded border border-border bg-surface p-4">
+            <h3 className="mb-3 text-sm font-medium text-text">
+              Auto-tagging failures ({autoTagJob.failures.length})
+            </h3>
+            <ul className="max-h-48 space-y-2 overflow-y-auto pr-1">
+              {autoTagJob.failures.map((f, i) => (
                 <li
                   key={`${f.id}-${i}`}
-                  className="text-xs text-red-400 flex flex-col sm:flex-row sm:items-baseline sm:gap-2"
+                  className="flex flex-col text-sm text-danger sm:flex-row sm:items-baseline sm:gap-2"
                 >
-                  <span className="font-mono font-medium shrink-0">
+                  <span className="shrink-0 font-medium">
                     {f.name}
                   </span>
-                  <span className="text-ink/60 truncate">— {f.error}</span>
+                  <span className="truncate text-muted">— {f.error}</span>
                 </li>
               ))}
             </ul>

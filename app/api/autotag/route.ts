@@ -1,14 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDriveImageForClassification } from "@/lib/googleDrive";
-import { classifyImage, ClassifierUnavailableError } from "@/lib/gemini";
+import { ClassifierUnavailableError } from "@/lib/gemini";
 import { supabaseAdmin } from "@/lib/supabase";
-import {
-  deriveSelectionFromTags,
-  isPrimaryMacro,
-  normalizeTags,
-  type MacroPortfolio,
-} from "@/lib/taxonomy";
+import { isPrimaryMacro, type MacroPortfolio } from "@/lib/taxonomy";
 import { getTaxonomyTree } from "@/lib/taxonomyStore";
+import { clearTagCountCache } from "@/lib/tagCounts";
+import {
+  autoTagImage,
+  buildFacetScaffold,
+  buildVocab,
+} from "@/lib/autoTagging";
 
 export const runtime = "nodejs";
 
@@ -22,24 +23,8 @@ const MAX_LIMIT = 30;
 // wasn't processed.
 const TIME_BUDGET_MS = 45_000;
 
-// Cap on how many untagged asset IDs GET hands out per call (the client
-// works through them and refreshes the list when done).
-const MAX_IDS = 20_000;
-
-function buildVocab(tree: MacroPortfolio[]): Map<string, string> {
-  const vocab = new Map<string, string>();
-  for (const m of tree) {
-    if (!vocab.has(m.name.toLowerCase())) vocab.set(m.name.toLowerCase(), m.name);
-    for (const c of m.coreSectors) {
-      if (!vocab.has(c.name.toLowerCase()))
-        vocab.set(c.name.toLowerCase(), c.name);
-      for (const t of c.subSectors) {
-        if (!vocab.has(t.toLowerCase())) vocab.set(t.toLowerCase(), t);
-      }
-    }
-  }
-  return vocab;
-}
+// Cap on how many asset IDs GET hands out per call (supports full library of 35k+ assets)
+const MAX_IDS = 100_000;
 
 interface DAMAssetRow {
   id: string;
@@ -56,11 +41,18 @@ interface DAMAssetRow {
 // Fetch all matching assets handling Supabase 1000-row limit pagination
 async function fetchAllMatchingAssets(
   folderPath?: string,
+  folderPaths?: string[],
   fields = "id, folder_path, tags, macro_portfolio, core_sector, mime_type"
 ): Promise<DAMAssetRow[]> {
   const PAGE_SIZE = 1000;
   let page = 0;
   let all: DAMAssetRow[] = [];
+
+  const paths = Array.isArray(folderPaths) && folderPaths.length > 0
+    ? folderPaths
+    : folderPath
+    ? [folderPath]
+    : [];
 
   while (true) {
     let query = supabaseAdmin
@@ -68,10 +60,12 @@ async function fetchAllMatchingAssets(
       .select(fields)
       .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
 
-    if (folderPath) {
-      query = query.or(
-        `folder_path.eq.${folderPath},folder_path.like.${folderPath}/%`
-      );
+    if (paths.length > 0) {
+      const orClauses = paths.flatMap((p) => [
+        `folder_path.eq.${p}`,
+        `folder_path.like.${p}/%`,
+      ]);
+      query = query.or(orClauses.join(","));
     }
 
     const { data, error } = await query;
@@ -98,37 +92,48 @@ function isUntagged(asset: {
   macro_portfolio?: string | null;
   core_sector?: string | null;
 }): boolean {
-  const hasNoTags = !asset.tags || asset.tags.length === 0;
-  const hasNoTaxonomy = !asset.macro_portfolio || !asset.core_sector;
-  const facetOnly = !!asset.macro_portfolio && !isPrimaryMacro(asset.macro_portfolio);
-  return hasNoTags || hasNoTaxonomy || facetOnly;
+  if (!Array.isArray(asset.tags) || asset.tags.length === 0) return true;
+  if (!asset.macro_portfolio || !asset.core_sector) return true;
+  if (!isPrimaryMacro(asset.macro_portfolio)) return true;
+  return false;
 }
 
 // GET /api/autotag
-// Returns summary statistics of untagged image assets in dwp.dam.
-// With ?includeIds=1 the response also carries the untagged asset IDs (capped
-// at MAX_IDS) — the auto-tag run works through that fixed list in small
-// POST batches instead of re-deriving "what's untagged" on every batch.
+// Returns total images, untagged count, and optionally an array of untagged
+// asset IDs so the client can drive batch progress.
+// Query params:
+//   folderPath?: string
+//   includeIds?: 1
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
-    const folderPath = searchParams.get("folderPath") || "";
+    const folderPath = searchParams.get("folderPath")?.trim() || undefined;
     const includeIds = searchParams.get("includeIds") === "1";
 
-    const assets = await fetchAllMatchingAssets(folderPath);
-
-    const totalAssets = assets.length;
-    const imageAssets = assets.filter((a) =>
-      a.mime_type && a.mime_type.startsWith("image/")
+    const allAssets = await fetchAllMatchingAssets(
+      folderPath,
+      undefined,
+      "id, folder_path, tags, macro_portfolio, core_sector, mime_type"
     );
-    const untaggedImages = imageAssets.filter(isUntagged);
+
+    // Filter to taggable media (images and PDFs)
+    const images = allAssets.filter((a) =>
+      a.mime_type && (a.mime_type.startsWith("image/") || a.mime_type === "application/pdf")
+    );
+
+    // Find untagged / incomplete images
+    const untaggedImages = images.filter(isUntagged);
 
     return NextResponse.json({
-      total: totalAssets,
-      totalImages: imageAssets.length,
+      total: allAssets.length,
+      totalImages: images.length,
       untaggedCount: untaggedImages.length,
+      taggedCount: images.length - untaggedImages.length,
       ...(includeIds
-        ? { untaggedIds: untaggedImages.slice(0, MAX_IDS).map((a) => a.id) }
+        ? {
+            untaggedIds: untaggedImages.slice(0, MAX_IDS).map((a) => a.id),
+            allImageIds: images.slice(0, MAX_IDS).map((a) => a.id),
+          }
         : {}),
     });
   } catch (error) {
@@ -153,6 +158,7 @@ export async function GET(request: NextRequest) {
 // JSON body:
 //   limit?: number          (default 10, max 30)
 //   folderPath?: string     (optional folder path filter)
+//   folderPaths?: string[]  (optional multiple folder paths)
 //   assetIds?: string[]     (optional specific list of asset UUIDs to tag)
 //   excludeIds?: string[]   (optional asset UUIDs to skip from search, e.g. already attempted)
 //   forceAll?: boolean      (if true, re-tags even if already tagged)
@@ -165,6 +171,9 @@ export async function POST(request: NextRequest) {
     );
     const folderPath =
       typeof body?.folderPath === "string" ? body.folderPath.trim() : "";
+    const folderPaths = Array.isArray(body?.folderPaths)
+      ? body.folderPaths.filter((p: unknown): p is string => typeof p === "string" && !!p)
+      : [];
     const specificIds = Array.isArray(body?.assetIds)
       ? body.assetIds.filter((id: unknown): id is string => typeof id === "string")
       : [];
@@ -173,26 +182,36 @@ export async function POST(request: NextRequest) {
       : [];
     const forceAll = Boolean(body?.forceAll);
 
-    let allAssets: DAMAssetRow[];
+    let allAssets: DAMAssetRow[] = [];
     if (specificIds.length > 0) {
-      const { data, error } = await supabaseAdmin
-        .from("common_dam_assets")
-        .select(
-          "id, drive_file_id, name, folder_path, tags, macro_portfolio, core_sector, sub_sectors, mime_type"
-        )
-        .in("id", specificIds);
-      if (error) throw new Error(error.message);
-      allAssets = (data as unknown as DAMAssetRow[]) ?? [];
+      // Chunk specificIds into blocks of 40 to prevent HTTP 414 URI length errors
+      const CHUNK_SIZE = 40;
+      // Fetch up to the needed batch size + buffer (max 120 per request)
+      const targetIds = specificIds.slice(0, Math.max(limit * 3, 120));
+      for (let i = 0; i < targetIds.length; i += CHUNK_SIZE) {
+        const chunk = targetIds.slice(i, i + CHUNK_SIZE);
+        const { data, error } = await supabaseAdmin
+          .from("common_dam_assets")
+          .select(
+            "id, drive_file_id, name, folder_path, tags, macro_portfolio, core_sector, sub_sectors, mime_type"
+          )
+          .in("id", chunk);
+        if (error) throw new Error(error.message);
+        if (data) {
+          allAssets.push(...(data as unknown as DAMAssetRow[]));
+        }
+      }
     } else {
       allAssets = await fetchAllMatchingAssets(
         folderPath,
+        folderPaths,
         "id, drive_file_id, name, folder_path, tags, macro_portfolio, core_sector, sub_sectors, mime_type"
       );
     }
 
-    // Filter to images
+    // Filter to taggable media (images and PDFs)
     let candidates = allAssets.filter((a) =>
-      a.mime_type && a.mime_type.startsWith("image/")
+      a.mime_type && (a.mime_type.startsWith("image/") || a.mime_type === "application/pdf")
     );
 
     // Exclude previously attempted asset IDs in this run
@@ -225,41 +244,20 @@ export async function POST(request: NextRequest) {
 
     const tree = await getTaxonomyTree();
     const vocab = buildVocab(tree);
-
-    // Pure structural names of facet macros / core sectors — e.g. "location
-    // matrix", "global region", "studio hub (jurisdiction)". These are
-    // scaffolding, never descriptive tags, so strip them from the written tag
-    // set: re-tagged rows shed the stale "location matrix / global region"
-    // labels the bulk import left behind, and they never reappear.
-    //   • Facet SUB-sector tags ("australia", "coastal") are kept — useful.
-    //   • A facet whose core name IS its own tag (e.g. "Biophilic Design",
-    //     "Award Winner") is a real tag, so anything that also exists as a
-    //     sub-sector is excluded from the scaffold set and kept.
-    const subVocab = new Set<string>();
-    for (const m of tree)
-      for (const c of m.coreSectors)
-        for (const s of c.subSectors) subVocab.add(s.toLowerCase());
-
-    const facetScaffold = new Set<string>();
-    for (const m of tree) {
-      if (isPrimaryMacro(m.name)) continue;
-      const macroL = m.name.toLowerCase();
-      if (!subVocab.has(macroL)) facetScaffold.add(macroL);
-      for (const c of m.coreSectors) {
-        const coreL = c.name.toLowerCase();
-        if (!subVocab.has(coreL)) facetScaffold.add(coreL);
-      }
-    }
+    const facetScaffold = buildFacetScaffold(tree);
 
     let taggedCount = 0;
     let failedCount = 0;
     const results: {
       id: string;
       name: string;
+      folderPath?: string;
+      driveFileId?: string;
       status: "success" | "failed";
       tags?: string[];
       macro?: string | null;
       core?: string | null;
+      spaceType?: string | null;
       error?: string;
     }[] = [];
 
@@ -275,60 +273,27 @@ export async function POST(request: NextRequest) {
         const { buffer, mimeType } = await getDriveImageForClassification(
           asset.drive_file_id
         );
-        const base64 = buffer.toString("base64");
 
-        // 2. Classify image with Gemini Vision AI
-        const assessment = await classifyImage(base64, mimeType);
+        // 2. Classify image with Gemini Vision AI & apply taxonomy
+        const tagged = await autoTagImage({
+          image: buffer,
+          mimeType,
+          folderPath: asset.folder_path,
+          existingTags: asset.tags ?? [],
+          tree,
+          vocab,
+          facetScaffold,
+          fallbackOnError: false,
+        });
 
-        // 3. Extract folder path taxonomy terms
-        const pathSegments = asset.folder_path
-          .split("/")
-          .map((s: string) => s.trim())
-          .filter(Boolean);
-        const folderTags = pathSegments
-          .map((s: string) => vocab.get(s.toLowerCase()))
-          .filter((s: string | undefined): s is string => Boolean(s));
-
-        // 4. Taxonomy selection (AI selection takes priority, fall back to derived from tags)
-        let macro_portfolio = assessment.macro_portfolio;
-        let core_sector = assessment.core_sector;
-        let sub_sectors = assessment.sub_sectors || [];
-
-        // 5. Combine sub-sectors (sub-tags), macro, core, preset tags, folder tags, and existing tags
-        const existingTags = Array.isArray(asset.tags) ? asset.tags : [];
-        const combinedRaw = [
-          ...existingTags,
-          ...folderTags,
-          ...(macro_portfolio ? [macro_portfolio] : []),
-          ...(core_sector ? [core_sector] : []),
-          ...sub_sectors,
-          ...(assessment.presetTags || []),
-        ];
-        // normalizeTags lower-cases + dedupes; then drop facet scaffolding
-        // names ("location matrix", "global region", ...) that shouldn't live
-        // in the tag list. macro_portfolio/core_sector below are primary-only,
-        // so this never removes the real sector tags.
-        const tags = normalizeTags(combinedRaw, 20).filter(
-          (t) => !facetScaffold.has(t)
-        );
-
-        if (!macro_portfolio || !core_sector) {
-          const derived = deriveSelectionFromTags(tags, tree);
-          macro_portfolio = macro_portfolio || derived.macro_portfolio;
-          core_sector = core_sector || derived.core_sector;
-          if (!sub_sectors || sub_sectors.length === 0) {
-            sub_sectors = derived.sub_sectors;
-          }
-        }
-
-        // 6. Update database row
+        // 3. Update database row
         const { error: updateErr } = await supabaseAdmin
           .from("common_dam_assets")
           .update({
-            tags,
-            macro_portfolio,
-            core_sector,
-            sub_sectors,
+            tags: tagged.tags,
+            macro_portfolio: tagged.macro_portfolio,
+            core_sector: tagged.core_sector,
+            sub_sectors: tagged.sub_sectors,
           })
           .eq("id", asset.id);
 
@@ -338,10 +303,13 @@ export async function POST(request: NextRequest) {
         results.push({
           id: asset.id,
           name: asset.name,
+          folderPath: asset.folder_path,
+          driveFileId: asset.drive_file_id,
           status: "success",
-          tags,
-          macro: macro_portfolio,
-          core: core_sector,
+          tags: tagged.tags,
+          macro: tagged.macro_portfolio,
+          core: tagged.core_sector,
+          spaceType: tagged.space_type,
         });
       } catch (err) {
         // Only a GLOBAL failure aborts the batch: no API key means AI is off
@@ -364,6 +332,8 @@ export async function POST(request: NextRequest) {
         results.push({
           id: asset.id,
           name: asset.name,
+          folderPath: asset.folder_path,
+          driveFileId: asset.drive_file_id,
           status: "failed",
           error: msg,
         });
@@ -373,6 +343,9 @@ export async function POST(request: NextRequest) {
     // results.length, not batch.length — the time budget may have cut the
     // batch short, and unprocessed assets must count as remaining.
     const remaining = Math.max(0, totalMatching - results.length);
+
+    // Tag counts changed — drop the cached facet list.
+    clearTagCountCache();
 
     return NextResponse.json({
       processed: results.length,

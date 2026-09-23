@@ -1,0 +1,8 @@
+{
+  "name": "dwp-dam-sqlcheck",
+  "private": true,
+  "description": "Offline validators for the v2 schema and its migrations (real PG17 grammar via libpg-query WASM).",
+  "dependencies": {
+    "libpg-query": "^17.7.4"
+  }
+}

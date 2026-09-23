@@ -6,6 +6,7 @@ import {
   type MacroPortfolio,
 } from "@/lib/taxonomy";
 import { getTaxonomyTree } from "@/lib/taxonomyStore";
+import { clearTagCountCache } from "@/lib/tagCounts";
 
 export const runtime = "nodejs";
 
@@ -175,6 +176,9 @@ export async function POST(request: NextRequest) {
         }
       }
     }
+
+    // Tag counts changed — drop the cached facet list.
+    clearTagCountCache();
 
     return NextResponse.json({ imported, skipped, failures });
   } catch (error) {

@@ -1,0 +1,10 @@
+{
+  "name": "dwp-dam-pgtest",
+  "private": true,
+  "type": "module",
+  "description": "Applies SCHEMA.sql plus supabase/migrations to an in-process Postgres (PGlite) and runs behaviour tests. Local only; never touches a real database.",
+  "dependencies": {
+    "@electric-sql/pglite": "0.5.8",
+    "@electric-sql/pglite-pgvector": "0.0.9"
+  }
+}

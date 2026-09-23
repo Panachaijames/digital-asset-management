@@ -8,14 +8,34 @@
 
 substitutions:
   _IMAGE: "" # full image path, e.g. REGION-docker.pkg.dev/PROJECT/REPO/SERVICE:latest
+  # A separate image that retains the Dockerfile's `deps` stage. The production
+  # image intentionally does not contain dev dependencies, so it cannot cache
+  # `npm ci` by itself.
+  _DEPS_CACHE_IMAGE: "" # e.g. REGION-docker.pkg.dev/PROJECT/REPO/SERVICE:deps-cache
 
 steps:
+  # Cloud Build workers are fresh for every run. Restore the dependency-stage
+  # image first so an unchanged lockfile skips the slow npm ci layer.
   - name: gcr.io/cloud-builders/docker
-    args: ["build", "-t", "${_IMAGE}", "."]
+    id: pull-deps-cache
+    entrypoint: bash
+    args: ["-c", "docker pull ${_DEPS_CACHE_IMAGE} || exit 0"]
 
-# Listing the image here makes Cloud Build push it after a successful build.
+  - name: gcr.io/cloud-builders/docker
+    id: build
+    args: ["build", "--cache-from", "${_DEPS_CACHE_IMAGE}", "-t", "${_IMAGE}", "."]
+
+  # Refresh the cache after the app image builds. With an unchanged lockfile
+  # this reuses the layer that was just restored, so it adds negligible time.
+  - name: gcr.io/cloud-builders/docker
+    id: refresh-deps-cache
+    args: ["build", "--cache-from", "${_DEPS_CACHE_IMAGE}", "--target", "deps", "-t", "${_DEPS_CACHE_IMAGE}", "."]
+
+# Listing images here makes Cloud Build push both the deployable image and the
+# reusable dependency cache after a successful build.
 images:
   - "${_IMAGE}"
+  - "${_DEPS_CACHE_IMAGE}"
 
 options:
   # Avoids the "logs bucket / service account" requirement; logs go to Cloud

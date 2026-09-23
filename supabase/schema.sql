@@ -20,13 +20,15 @@ create table if not exists common_dam_assets (
   web_view_link text not null,
   thumbnail_link text,
   uploaded_by text,
+  publish_permission text not null default 'pending',
   created_at timestamptz not null default now()
 );
 
--- Migration for existing installs that predate the taxonomy columns.
+-- Migration for existing installs that predate the taxonomy or publish_permission columns.
 alter table common_dam_assets add column if not exists macro_portfolio text;
 alter table common_dam_assets add column if not exists core_sector text;
 alter table common_dam_assets add column if not exists sub_sectors text[] not null default '{}';
+alter table common_dam_assets add column if not exists publish_permission text default 'pending';
 
 -- Fast tag lookups (contains / overlap queries).
 create index if not exists common_dam_assets_tags_gin on common_dam_assets using gin (tags);
@@ -35,6 +37,7 @@ create index if not exists common_dam_assets_tags_gin on common_dam_assets using
 create index if not exists common_dam_assets_macro_idx on common_dam_assets (macro_portfolio);
 create index if not exists common_dam_assets_core_idx on common_dam_assets (core_sector);
 create index if not exists common_dam_assets_sub_gin on common_dam_assets using gin (sub_sectors);
+create index if not exists common_dam_assets_publish_permission_idx on common_dam_assets (publish_permission);
 
 -- Fast folder browsing.
 create index if not exists common_dam_assets_folder_id_idx on common_dam_assets (folder_id);
@@ -175,3 +178,27 @@ on conflict (group_name, tag) do nothing;
 --     on a.core_sector = t.core_sector and t.sub_sector = any(a.sub_sectors)
 --   group by 1, 2, 3
 --   order by 1, 2, 3;
+
+-- ---------------------------------------------------------------------------
+-- Folder-tree sync state (lib/folderIndex.ts).
+--
+-- Google Drive's whole-drive folder listing is eventually consistent on a scale
+-- of hours, so the app keeps its own folder index fresh with the Drive Changes
+-- API. This table stores, per Shared Drive, the change-feed token to replay
+-- from after a restart / on a new Cloud Run instance, so folders created (or
+-- trashed) in the hours before that restart are still reflected. `page_token`
+-- is the replay-from token; `candidate_token` is a younger token that the app
+-- promotes into `page_token` once it is ~2 days old (old enough that Drive's
+-- listing can be trusted for everything before it). One row per drive; the app
+-- creates and advances the rows itself. Without this table the app still works
+-- but logs a warning and loses that cross-restart guarantee.
+create table if not exists common_dam_drive_sync (
+  drive_id        text primary key,
+  page_token      text not null,
+  candidate_token text,
+  candidate_at    timestamptz,
+  updated_at      timestamptz not null default now()
+);
+-- Like the other tables: the app writes with the anon key, so RLS must stay
+-- off (the dashboard's Table Editor turns it on for tables it creates).
+alter table common_dam_drive_sync disable row level security;

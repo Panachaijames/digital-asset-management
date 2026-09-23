@@ -68,12 +68,13 @@ Missing/wrong key → `401`. Key lacks permission → `403`. Error body is alway
 | `GET` | `/api/v1/assets/{id}/thumbnail` | Fast preview image (default 640px) |
 | `GET` | `/api/v1/tags` | All known tags (to build filter dropdowns) |
 | `GET` | `/api/v1/presets` | The preset tag library, grouped (the DAM's tag menu) |
+| `GET` | `/api/v1/folders` | Folder paths — find a folder / check one exists |
 
 ### Write endpoints (need a `write` key)
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/v1/folders` | Create a folder |
+| `POST` | `/api/v1/folders` | Create a folder (missing levels created as needed) |
 | `POST` | `/api/v1/assets` | Upload a new image |
 | `POST` | `/api/v1/assets/{id}/update` | Change an image's name / tags |
 | `POST` | `/api/v1/assets/{id}/replace` | Swap the image file itself (same id, same URLs) |
@@ -101,9 +102,48 @@ All parameters are optional; combine freely.
 | `sub` | Comma-separated Sub-Sectors; must have all | `sub=Luxury+Resort` |
 | `path` | Exact Drive folder path | `path=dwp_Digital_Asset/ProjectX` |
 | `pathPrefix` | Folder path prefix (folder + subfolders) | `pathPrefix=dwp_Digital_Asset/ProjectX` |
+| `studio` | dwp studio / project location — ids listed below | `studio=bangkok` |
 | `sort` | `newest` (default) or `oldest` | `sort=oldest` |
 | `limit` | Page size, default 60, max 100 | `limit=24` |
 | `offset` | Skip N results (pagination) | `offset=24` |
+
+### Studio ids for `studio=`
+
+A project’s studio comes from the location folder in its Drive path
+(`dwp_Digital_Asset/<collection>/<LOCATION>/<project>/…`) — there is no studio
+field on an asset. The match is on a whole path segment, so `studio=bangkok`
+finds everything under a `Thailand` folder without matching a project merely
+*named* "Thailand Creative & Design Center".
+
+Roughly 8% of the library sits outside any location folder (`Marketing
+Requests`, `ARCHIVED`, `_dwp Videos`, `Staff Photo 2026`, and projects filed
+straight under `3D Projects`). Those assets match no `studio` and are never
+returned by a `studio=` query.
+
+A city name is used only where dwp has one studio for that location. Where it
+has several or none, the id is the location itself — `australia` covers the
+Sydney, Melbourne, Brisbane, Adelaide and Newcastle studios, which the folder
+path cannot tell apart.
+
+| `studio=` | Shown as | Drive location folder(s) |
+|---|---|---|
+| `australia` | Australia | `Australia`, `AUS_ARCHIVED` |
+| `bahrain` | Bahrain | `Bahrain` |
+| `bangkok` | Bangkok · Thailand | `Thailand` |
+| `china` | China | `China` |
+| `dubai` | Dubai · UAE | `UAE` |
+| `ho-chi-minh-city` | Ho Chi Minh City · Vietnam | `Vietnam` |
+| `hong-kong` | Hong Kong | `Hong Kong` |
+| `london` | London · United Kingdom | `United Kingdom`, `UK` — *no such folder yet, so this id matches nothing and the picker hides it* |
+| `malaysia` | Malaysia | `Malaysia` |
+| `myanmar` | Myanmar | `Myanmar` |
+| `new-zealand` | New Zealand | `New Zealand` |
+| `philippines` | Philippines | `Philippines`, `Manila` |
+| `riyadh` | Riyadh · Saudi Arabia | `Saudi Arabia`, `KSA` — *no such folder yet, so this id matches nothing and the picker hides it* |
+| `singapore` | Singapore | `Singapore` |
+| `united-states` | United States | `USA`, `United States` |
+
+An unrecognised value is a `400 bad_request` listing the valid ids.
 
 ### Response shape (used by search, upload, update, replace)
 
@@ -160,26 +200,70 @@ Same response shape as the GET version.
 ### `POST /api/v1/folders` — create a folder
 
 ```json
-{ "parentPath": "dwp_Digital_Asset/ProjectX", "name": "Interiors" }
+{ "name": "Interiors", "location": "dwp_Digital_Asset/ProjectX" }
 ```
-
-- `parentPath` starts with the Shared Drive name and must already exist.
-- Safe to call twice: if the folder already exists it is reused, and the
-  response tells you via `created`.
-
-```json
-{ "data": { "path": "dwp_Digital_Asset/ProjectX/Interiors", "created": true } }
-```
-
-### `POST /api/v1/assets` — upload an image
-
-`multipart/form-data`, **one image per request**:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `file` | yes | The image file (`image/*` only, max 30 MB) |
-| `folderPath` | yes | Destination folder, e.g. `dwp_Digital_Asset/ProjectX/Interiors` — must already exist (create it first via `/folders`) |
-| `tags` | no | Comma-separated tags; sector fields are derived from them automatically |
+| `name` | yes | The folder to create. Slashes mean nesting — `"ProjectY/Interiors"` creates both levels. |
+| `location` | see below | Where to create it. A key with a **site root** (see `DAM_SITE_ROOTS` below) can omit it — the folder lands in that root — or give a path relative to it; a key without a root must send the full path starting with the Shared Drive name. `parentPath` is the old name for this field and still works. |
+| `createParents` | no | Default `true`: missing levels in `location` are created too, so a whole branch appears in one call. `false` restores the strict behaviour — the call fails naming the first missing folder. |
+
+- Safe to call twice: an existing folder is reused, and the response says so
+  via `created`.
+- `createdParents` lists any parents the call had to create — a non-empty list
+  the caller didn't expect usually means a typo in `location`.
+- A key with a site root can only create inside it; anything outside → `403`.
+
+```json
+{
+  "data": {
+    "path": "dwp_Digital_Asset/ProjectX/Interiors",
+    "name": "Interiors",
+    "location": "dwp_Digital_Asset/ProjectX",
+    "created": true,
+    "createdParents": []
+  }
+}
+```
+
+### `GET /api/v1/folders` — list folders (read key is enough)
+
+For finding a folder or checking one exists before uploading into it.
+
+| Param | Meaning | Example |
+|---|---|---|
+| `location` (or `prefix`) | Limit to this folder and its subfolders | `location=dwp_Digital_Asset/ProjectX` |
+| `depth` | Levels below it; `1` = immediate children | `depth=1` |
+| `q` | Case-insensitive substring match on the path | `q=interiors` |
+| `limit` | Max paths, default 500, max 2000 | `limit=100` |
+
+```json
+{
+  "data": {
+    "root": "dwp_Digital_Asset/ProjectX",
+    "paths": ["dwp_Digital_Asset/ProjectX", "dwp_Digital_Asset/ProjectX/Interiors"]
+  },
+  "meta": { "count": 2, "total": 2, "limit": 500 }
+}
+```
+
+`root` echoes the effective scope (the site root, or the `location` you sent,
+or `null` for the whole tree). `total` above `count` means more folders matched
+than `limit` returned. Folder creation invalidates the cache, so a folder you
+just created is listed immediately; folder changes made directly in Drive can
+take up to a minute to appear.
+
+### `POST /api/v1/assets` — upload an image or PDF
+
+`multipart/form-data`, **one file per request**:
+
+| Field | Required | Meaning |
+|---|---|---|
+| `file` | yes | The file (`image/*` or `application/pdf`, max 30 MB) |
+| `folderPath` | yes | Destination folder, e.g. `dwp_Digital_Asset/ProjectX/Interiors` — must already exist (create it first via `/folders`). Same location rules as `/folders`: relative to the key's site root when it has one, and never outside it. **Always required**, even for a key with a root — an upload has to name its destination, so a caller bug can't quietly pile images into the root. |
+| `tags` | no | Comma-separated tags; preserved, cleaned of `#`, and merged with AI-generated tags |
+| `autoTag` | no | `true` (default) or `false` — runs Gemini Vision AI to generate ~14+ rich architectural & interior tags and set macro/core sector taxonomy |
 
 ```js
 const form = new FormData();
@@ -192,8 +276,10 @@ const res = await fetch("https://<dam>/api/v1/assets", {
   headers: { "x-api-key": DAM_API_KEY },
   body: form, // don't set Content-Type yourself — fetch does it for multipart
 });
-const { data } = await res.json(); // the new asset, incl. image_url
+const { data } = await res.json(); // the new asset, incl. image_url and AI tags
 ```
+
+By default, every uploaded image is automatically analyzed with Gemini Vision AI to generate ~14+ rich architectural & interior tags (materials, lighting, typologies, space type, styles) and populate `macro_portfolio`, `core_sector`, and `sub_sectors`. Any caller-supplied `tags` are preserved and merged. Pass `autoTag: "false"` to opt out of AI classification.
 
 Uploading several images = several requests (running them in parallel is fine).
 **Don't blind-retry a timed-out upload** — it may have succeeded, and retrying
@@ -281,7 +367,10 @@ app/api/v1/
                                 then update mime_type / size_bytes in Supabase
       delete/route.ts      POST drive trash (files.update { trashed: true }),
                                 then delete the Supabase row
-  folders/route.ts         POST wrap createFolderAtPath(); return only { path, created }
+  folders/route.ts         GET  list folder paths (cached tree from lib/drivePaths.ts),
+                                scoped to the key's site root, with location/depth/q/limit
+                           POST wrap createFolderAtPath() with createParents; return only
+                                { path, name, location, created, createdParents }
   tags/route.ts            GET  distinct tags (reuse app/api/tags logic)
   presets/route.ts         GET  the preset library  |  POST add tags to a group
   presets/update/route.ts  POST rename a preset tag or group
@@ -292,6 +381,11 @@ app/api/v1/
                             common_dam_presets, like common_dam_assets)
 
 lib/api/
+  folderScope.ts resolveSiteLocation(site, location): applies DAM_SITE_ROOTS —
+                 turns an omitted/relative location into an absolute path under
+                 the key's root and rejects anything outside it (403). Used by
+                 /folders (GET + POST) and the upload's folderPath, so one key
+                 has one folder space for every write it can do
   auth.ts        requireApiKey(request, scope): checks x-api-key header OR ?key=
                  against DAM_API_KEYS, then checks the key has the needed scope
                  ("read" | "write" — write covers delete); returns the site
@@ -346,7 +440,12 @@ lib/googleDrive.ts — add three small functions next to uploadFileToDrive():
 9. **Uploads address folders by human path, and the folder must already
    exist.** Consumers create folders explicitly via `POST /folders` (which is
    find-or-create, so it's retry-safe). This keeps typos from silently
-   spawning new folder trees.
+   spawning new folder trees. **Folder creation itself is `mkdir -p`** —
+   missing levels in `location` are created (opt out with
+   `createParents: false`) and listed back in `createdParents`. The asymmetry
+   is deliberate: on the endpoint whose whole job is making folders, building
+   "Projects/Marketing Hub/Q3" shouldn't take three calls; on upload a typo
+   would orphan an image in a stray folder, so upload still fails loudly.
 10. **Upload rules: one image per request, `image/*` MIME types only,
     ≤ 30 MB** (Cloud Run caps requests at 32 MB). Batch = parallel requests.
 11. **`update` replaces the whole tags array** and re-derives the taxonomy
@@ -360,6 +459,14 @@ lib/googleDrive.ts — add three small functions next to uploadFileToDrive():
     trade-off to keep v1 simple.
 14. **No idempotency in v1** — a retried upload makes a duplicate. Documented
     for consumers; an `Idempotency-Key` header is the "Later" fix if it bites.
+15. **`DAM_SITE_ROOTS` gives a key one folder space.** A site with a root
+    creates folders and uploads relative to it, and is fenced to it (`403`
+    outside) — which is what a per-project consumer app wants: it sends a
+    project name, not a Drive path. Reads (search, `GET /assets/{id}`, image,
+    thumbnail) and edits by asset id are deliberately NOT fenced: every
+    consumer is internal and cross-team reuse is the point (the per-asset
+    version of this is the ownership check under "Later"). A site with no root
+    behaves exactly as it did before roots existed — absolute paths, no fence.
 
 ### New environment variables
 
@@ -372,8 +479,15 @@ Already set in `.env.local` (real values) and passed through to Cloud Run by
 DAM_API_KEYS=site-a:dam_live_xxxxxxxx:read+write,site-b:dam_live_yyyyyyyy:read+write
 
 # base for image/thumbnail URLs in responses (optional — the code falls back
-# to the request's own origin when unset)
-DAM_PUBLIC_BASE_URL=https://dwp-dam-4w57ydlk6q-eu.a.run.app
+# to the request's own origin when unset). MUST match the live service: on the
+# dwp2026 project that is
+DAM_PUBLIC_BASE_URL=https://dwp-dam-s2r2rmdlzq-eu.a.run.app
+
+# optional per-site folder roots:  site:path  entries, comma-separated, path
+# starting with the Shared Drive name. A site listed here creates folders and
+# uploads relative to its root and cannot write outside it; a site not listed
+# keeps sending absolute paths with no fence. Site names match DAM_API_KEYS.
+DAM_SITE_ROOTS=dwp-marketing-hub:dwp_Digital_Asset/Marketing Hub
 ```
 
 There is deliberately **no CORS origin list**: all consumers are internal, so
@@ -401,6 +515,43 @@ the JSON routes answer CORS with `*` and the API key does the gatekeeping.
 7. They wire up one test page; confirm a browser fetch works from their page,
    and (for a write site) that a test upload appears in the DAM's browse page.
 
+### Onboarding another consumer site (e.g. `dwp-marketing-hub`, `studioai`)
+
+Every consumer issued so far — all Cloud Run services in the *same* project and
+region as the DAM (`dwp2026` / `asia-southeast3`):
+
+| Key name | Consumer service | Folder space | Guide |
+|---|---|---|---|
+| `dwp_website2026` | the dwp.com site | *(unfenced — absolute paths)* | `docs/DAM-API-GUIDE-dwp_website2026.md` |
+| `proposal-maker` | proposal tooling | *(unfenced — absolute paths)* | `docs/DAM-API-GUIDE-proposal-maker.md` |
+| `dwp-marketing-hub` | https://dwp-marketing-hub-s2r2rmdlzq-eu.a.run.app | `dwp_Digital_Asset/Marketing Hub` | `docs/DAM-API-GUIDE-dwp-marketing-hub.md` |
+| `studioai` | https://studioai-v2-s2r2rmdlzq-eu.a.run.app | `dwp_Digital_Asset/StudioAI` | `docs/DAM-API-GUIDE-studioai.md` |
+
+Same-project doesn't change anything: a consumer still authenticates with an API
+key over HTTPS like any other, and no origin allow-listing is needed (CORS is
+`*`). Note `studioai` is deliberately *not* named `studioai-v2` after its Cloud
+Run service — the key name is written into every `uploaded_by` row, so it should
+outlive a version bump.
+
+No code change — three env/doc steps:
+
+1. **Key** — append to `DAM_API_KEYS` in `.env.local`:
+   `,studioai:dam_live_<openssl rand -hex 24>:read+write`
+   (the site name lands in `uploaded_by` and every write log line).
+2. **Folder space (optional but recommended)** — append to `DAM_SITE_ROOTS`:
+   `studioai:dwp_Digital_Asset/StudioAI`. The site then sends folder
+   names/short paths instead of Drive paths, and can't write outside that
+   folder. The folder doesn't need to exist first — the site's first
+   `POST /folders` creates it.
+3. **Guide** — copy `docs/DAM-API-GUIDE-studioai.md` or
+   `docs/DAM-API-GUIDE-dwp-marketing-hub.md` (both written for the rooted flow;
+   retitle and fix the root path) and send it with the base URL + key. The
+   guides deliberately contain no key — send that separately.
+
+Then `set-env.ps1` (env-only change, ~15 s — no rebuild needed). Both scripts
+already pass `DAM_SITE_ROOTS` through; a var missing from those lists never
+reaches Cloud Run.
+
 ### Known limitations (v1)
 
 Accepted trade-offs — each has an upgrade path in "Later" if it starts to hurt.
@@ -416,7 +567,16 @@ Accepted trade-offs — each has an upgrade path in "Later" if it starts to hurt
   pages only.
 - **Any site with a write key can modify/delete ANY asset**, including images
   uploaded through the DAM UI or by the other site. `uploaded_by` tells you
-  who did it, but nothing prevents it (see ownership check in "Later").
+  who did it, but nothing prevents it (see ownership check in "Later"). A
+  `DAM_SITE_ROOTS` root narrows only *where new folders and uploads land* — it
+  does not stop that key editing or deleting an asset elsewhere by id.
+- **A site root is name-path based, like everything else here.** It doesn't
+  have to exist when you set it — the first `POST /folders` creates it (handy:
+  no manual Drive step to onboard a site). The flip side: rename or move the
+  root folder in Drive and the next call **recreates it empty** instead of
+  failing, so the site's new folders land in the recreated one while its old
+  images stay under the old name. Renaming a root folder = update
+  `DAM_SITE_ROOTS` in the same change.
 - **Adding or rotating a key means an env update**: edit `DAM_API_KEYS` in
   `.env.local` and run `set-env.ps1` (~15 s, no rebuild needed).
 - **Search is simple**: tag filters are AND-only (no OR), text search is a

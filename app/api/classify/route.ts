@@ -25,10 +25,25 @@ export async function POST(request: NextRequest) {
 
     const arrayBuffer = await image.arrayBuffer();
     const base64 = Buffer.from(arrayBuffer).toString("base64");
-    const mediaType = image.type || "image/jpeg";
+    const isPdf =
+      image.type === "application/pdf" ||
+      image.name?.toLowerCase().endsWith(".pdf");
+    const mediaType = isPdf ? "application/pdf" : (image.type || "image/jpeg");
 
-    const { presetTags, ...taxonomy } = await classifyImage(base64, mediaType);
-    return NextResponse.json({ taxonomy, presetTags });
+    const { presetTags, visualTags, spaceType, styleKeywords, ...taxonomy } =
+      await classifyImage(base64, mediaType);
+    return NextResponse.json({
+      taxonomy,
+      presetTags: [
+        ...(presetTags || []),
+        ...(visualTags || []),
+        ...(spaceType ? [spaceType] : []),
+        ...(styleKeywords || []),
+      ],
+      visualTags,
+      spaceType,
+      styleKeywords,
+    });
   } catch (error) {
     if (
       error instanceof ClassifierUnavailableError ||

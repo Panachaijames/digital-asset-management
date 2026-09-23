@@ -21,25 +21,24 @@ export default function TagPresets({
   const groups = useAllPresetGroups();
 
   return (
-    <div className="mt-2 rounded-sm border border-line bg-panel/60">
-      <label className="flex cursor-pointer select-none items-center gap-2 px-3 py-2">
+    <div className="mt-2 rounded border border-border bg-surface">
+      <label className="flex cursor-pointer select-none items-center gap-2 px-4 py-3">
         <input
           type="checkbox"
           checked={open}
           onChange={() => setOpen((v) => !v)}
-          className="h-3.5 w-3.5 accent-blueprint-600"
+          className="h-4 w-4 accent-accent"
         />
-        <span className="text-xs font-medium text-blueprint-400">Presets</span>
-        <span className="text-[11px] text-ink/30">
-          click to toggle · added to every image · use an image&apos;s own
-          “add from presets” for just that image
+        <span className="text-sm font-medium text-text">Tag Presets</span>
+        <span className="text-xs text-muted">
+          Click to toggle batch tags for every image in this queue
         </span>
       </label>
 
       {open && (
-        <div className="border-t border-line/60 px-3 py-3">
+        <div className="border-t border-border px-4 py-3">
           {!groups ? (
-            <p className="text-xs text-ink/40">Loading presets…</p>
+            <p className="text-xs text-muted">Loading presets</p>
           ) : (
             <PresetGroupChips
               groups={groups}
