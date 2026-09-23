@@ -45,24 +45,24 @@ export default function TagInput({
       <label
         className={
           compact
-            ? "block text-[10px] uppercase tracking-wider text-ink/40 mb-1"
-            : "block text-sm font-medium text-ink/70 mb-2"
+            ? "mb-1 block text-xs font-medium text-muted"
+            : "mb-2 block text-xs font-medium text-muted"
         }
       >
         {label}
       </label>
-      <div className="flex flex-wrap items-center gap-2 rounded-sm border border-line bg-card px-3 py-2 focus-within:border-blueprint-400">
+      <div className="flex flex-wrap items-center gap-2 rounded border border-border bg-surface px-3 py-2 transition-colors focus-within:border-text">
         {tags.map((tag) => (
           <span
             key={tag}
-            className="inline-flex items-center gap-1.5 rounded-sm bg-blueprint-50 px-2 py-1 font-mono text-xs text-blueprint-700"
+            className="inline-flex items-center gap-1.5 rounded-full border border-accent/25 bg-accent/5 px-2 py-0.5 text-xs font-medium text-text"
           >
             {tag}
             <button
               type="button"
               onClick={() => removeTag(tag)}
               aria-label={`Remove tag ${tag}`}
-              className="text-blueprint-400 hover:text-blueprint-700"
+              className="text-muted transition-colors hover:text-text"
             >
               ×
             </button>
@@ -74,11 +74,11 @@ export default function TagInput({
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={handleKeyDown}
           onBlur={commitDraft}
-          placeholder={tags.length ? "+ add tag" : "e.g. site-photos, bangkok, exterior"}
-          className="min-w-[140px] flex-1 border-none bg-transparent py-0.5 text-sm outline-none placeholder:text-ink/30"
+          placeholder={tags.length ? "Add tag" : "e.g. site-photos, bangkok, exterior"}
+          className="min-w-[140px] flex-1 border-none bg-transparent py-0.5 text-sm text-text outline-none placeholder:text-muted"
         />
       </div>
-      {hint && <p className="mt-1.5 text-xs text-ink/40">{hint}</p>}
+      {hint && <p className="mt-2 text-xs text-muted">{hint}</p>}
     </div>
   );
 }

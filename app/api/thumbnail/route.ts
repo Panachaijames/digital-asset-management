@@ -1,14 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDriveClient } from "@/lib/googleDrive";
+import { getThumbnailLink } from "@/lib/driveThumbnails";
 
 export const runtime = "nodejs";
 
-// GET /api/thumbnail?id=<driveFileId>
+const SIZES = new Set([320, 640, 1024, 1600]);
+
+// GET /api/thumbnail?id=<driveFileId>&folder=<driveFolderId>&size=640
 // Drive's thumbnailLink URLs are signed and expire after a few hours, so the
 // stored link in Supabase goes stale. The browse page requests thumbnails
-// through this route instead: it asks Drive for a FRESH link (service-account
-// auth) and 302-redirects to it. The Cache-Control lets the browser reuse the
-// redirect for 30 minutes so a grid doesn't re-hit Drive on every render.
+// through this route instead: it resolves a FRESH link (service-account auth)
+// and 302-redirects to it. The Cache-Control lets the browser reuse the
+// redirect for 30 minutes so a grid doesn't re-hit this route on every render.
+// folder (optional) is the asset's Drive folder — passing it lets the resolver
+// warm the whole folder's links in one Drive call instead of one per tile
+// (see lib/driveThumbnails.ts).
+// size (optional, default 640) picks the longest edge — the grid uses the
+// default, the full-screen preview asks for 1600.
 export async function GET(request: NextRequest) {
   const id = request.nextUrl.searchParams.get("id");
   if (!id || !/^[\w-]+$/.test(id)) {
@@ -17,15 +24,18 @@ export async function GET(request: NextRequest) {
       { status: 400 }
     );
   }
+  const sizeRaw = request.nextUrl.searchParams.get("size");
+  const size = sizeRaw === null ? 640 : Number(sizeRaw);
+  if (!SIZES.has(size)) {
+    return NextResponse.json(
+      { error: "size must be 320, 640, 1024 or 1600." },
+      { status: 400 }
+    );
+  }
+  const folder = request.nextUrl.searchParams.get("folder");
 
   try {
-    const drive = getDriveClient();
-    const res = await drive.files.get({
-      fileId: id,
-      fields: "thumbnailLink",
-      supportsAllDrives: true,
-    });
-    const link = res.data.thumbnailLink;
+    const link = await getThumbnailLink(id, folder);
     if (!link) {
       // Drive hasn't generated a thumbnail (yet) for this file.
       return NextResponse.json({ error: "No thumbnail." }, { status: 404 });
@@ -33,7 +43,7 @@ export async function GET(request: NextRequest) {
 
     // Drive links end in a size hint (e.g. "=s220") — bump it for crisp tiles.
     const sized = /=s\d+(-c)?$/.test(link)
-      ? link.replace(/=s\d+(-c)?$/, "=s640")
+      ? link.replace(/=s\d+(-c)?$/, `=s${size}`)
       : link;
 
     return NextResponse.redirect(sized, {

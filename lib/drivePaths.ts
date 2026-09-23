@@ -1,28 +1,9 @@
-import { listAllFolderPaths } from "@/lib/googleDrive";
-
-// Cached loader for the media-library folder tree. Walking every Shared Drive
-// on every /api/paths hit (mount, refresh, each folder create) is wasteful and
-// exposes the tree to transient Drive failures, so results are cached briefly
-// and stale results are served if a refresh fails. Invalidated by folder
-// creation so new folders appear immediately.
-
-let cache: { paths: string[]; at: number } | null = null;
-const TTL_MS = 60 * 1000;
-
-export async function getFolderPaths(): Promise<string[]> {
-  if (cache && Date.now() - cache.at < TTL_MS) return cache.paths;
-  try {
-    const paths = await listAllFolderPaths();
-    cache = { paths, at: Date.now() };
-    return paths;
-  } catch (e) {
-    // Serve the last-good result on a transient Drive failure so the folder
-    // tree doesn't collapse; only propagate if we've never loaded it.
-    if (cache) return cache.paths;
-    throw e;
-  }
-}
-
-export function clearFolderPathCache() {
-  cache = null;
-}
+// The folder tree used by /api/paths, the upload picker's search and
+// GET /api/v1/folders.
+//
+// This used to be a 60 s cache over Drive's whole-drive folder listing. That
+// listing turned out to be eventually consistent on a scale of hours, so new
+// folders "didn't exist" in the tree long after they were created. The tree
+// now comes from lib/folderIndex.ts, which is kept current with the Drive
+// Changes API; this module only keeps the import path stable for the routes.
+export { getFolderPaths, clearFolderPathCache } from "./folderIndex";

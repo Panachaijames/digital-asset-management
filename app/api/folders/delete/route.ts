@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveFolderPathToId, trashDriveFile } from "@/lib/googleDrive";
 import { clearFolderPathCache } from "@/lib/drivePaths";
+import { noteFolderTrashed } from "@/lib/folderIndex";
 import { supabaseAdmin } from "@/lib/supabase";
 
 export const runtime = "nodejs";
@@ -35,11 +36,14 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const { folderId } = await resolveFolderPathToId(path);
+    const { driveId, folderId } = await resolveFolderPathToId(path);
 
     // Drive first: one call moves the folder AND its whole subtree to trash.
     // If it fails, nothing is half-deleted.
     await trashDriveFile(folderId);
+    // Out of the tree immediately — Drive's change feed confirms it a few
+    // seconds later, but the next /api/paths must not still show it.
+    noteFolderTrashed(driveId, folderId);
     clearFolderPathCache();
 
     // Then drop every asset row at or under the path. LIKE wildcards must be

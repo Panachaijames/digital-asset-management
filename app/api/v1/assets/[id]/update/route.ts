@@ -7,6 +7,7 @@ import { renameDriveFile } from "@/lib/googleDrive";
 import { supabaseAdmin } from "@/lib/supabase";
 import { deriveSelectionFromTags, normalizeTags } from "@/lib/taxonomy";
 import { getTaxonomyTree } from "@/lib/taxonomyStore";
+import { clearTagCountCache } from "@/lib/tagCounts";
 
 export const runtime = "nodejs";
 export { handleOptions as OPTIONS } from "@/lib/api/cors";
@@ -31,8 +32,17 @@ export async function POST(
 
   const hasName = body.name !== undefined;
   const hasTags = body.tags !== undefined;
-  if (!hasName && !hasTags) {
-    return apiError("bad_request", "Nothing to change — send name and/or tags.", 400);
+  const rawPermission = body.publish_permission ?? body.publishPermission;
+  const hasPermission =
+    typeof rawPermission === "string" &&
+    ["granted", "pending", "restricted"].includes(rawPermission);
+
+  if (!hasName && !hasTags && !hasPermission) {
+    return apiError(
+      "bad_request",
+      "Nothing to change — send name, tags, and/or publish_permission.",
+      400
+    );
   }
 
   let newName = "";
@@ -77,6 +87,9 @@ export async function POST(
       updates.core_sector = taxonomy.core_sector;
       updates.sub_sectors = taxonomy.sub_sectors;
     }
+    if (hasPermission) {
+      updates.publish_permission = rawPermission;
+    }
 
     const { data, error } = await supabaseAdmin
       .from("common_dam_assets")
@@ -85,6 +98,9 @@ export async function POST(
       .select()
       .single();
     if (error) throw new Error(error.message);
+
+    // Tag counts changed — drop the cached facet list.
+    clearTagCountCache();
 
     console.log(
       `[api-v1] update site=${auth.site} id=${id} fields=${Object.keys(updates).join(",")}`

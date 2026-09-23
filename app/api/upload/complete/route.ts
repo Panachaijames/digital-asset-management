@@ -3,6 +3,7 @@ import { getDriveFileMetadata, trashDriveFile } from "@/lib/googleDrive";
 import { supabaseAdmin } from "@/lib/supabase";
 import { deriveSelectionFromTags, normalizeTags } from "@/lib/taxonomy";
 import { getTaxonomyTree } from "@/lib/taxonomyStore";
+import { clearTagCountCache } from "@/lib/tagCounts";
 
 export const runtime = "nodejs";
 
@@ -47,6 +48,14 @@ export async function POST(request: NextRequest) {
     const fileTags = sanitizeTagList(body?.fileTags);
     const batchTags = sanitizeTagList(body?.batchTags);
 
+    const validPermissions = ["granted", "pending", "restricted"];
+    const rawPermission = body?.publishPermission ?? body?.publish_permission;
+    const publishPermission = (
+      typeof rawPermission === "string" && validPermissions.includes(rawPermission)
+        ? rawPermission
+        : "pending"
+    ) as string;
+
     // Row tags = the image's own tags + the batch tags; sector columns are
     // derived from whichever tags match the taxonomy (same as classic upload).
     const rowTags = normalizeTags([...fileTags, ...batchTags], 20);
@@ -74,6 +83,7 @@ export async function POST(request: NextRequest) {
         macro_portfolio: taxonomy.macro_portfolio,
         core_sector: taxonomy.core_sector,
         sub_sectors: taxonomy.sub_sectors,
+        publish_permission: publishPermission,
         mime_type: meta.mimeType,
         size_bytes: Number(meta.size) || 0,
         web_view_link: meta.webViewLink,
@@ -93,6 +103,9 @@ export async function POST(request: NextRequest) {
       }
       throw new Error(error.message);
     }
+
+    // Tag counts changed — drop the cached facet list.
+    clearTagCountCache();
 
     return NextResponse.json({ result: data });
   } catch (error) {

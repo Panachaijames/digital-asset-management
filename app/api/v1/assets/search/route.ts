@@ -35,6 +35,7 @@ export async function POST(request: NextRequest) {
     sub: asList(body.sub),
     path: typeof body.path === "string" ? body.path : null,
     pathPrefix: typeof body.pathPrefix === "string" ? body.pathPrefix : null,
+    studio: typeof body.studio === "string" ? body.studio : null,
     sort: typeof body.sort === "string" ? body.sort : null,
     limit: body.limit === undefined ? undefined : Number(body.limit),
     offset: body.offset === undefined ? undefined : Number(body.offset),

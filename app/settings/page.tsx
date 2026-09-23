@@ -3,9 +3,10 @@ import TagSettings from "@/components/TagSettings";
 
 export default function SettingsPage() {
   return (
-    <AppShell crumb="Settings">
+    <AppShell crumb="Taxonomy">
       <div className="h-full overflow-y-auto">
-        <div className="mx-auto max-w-5xl px-6 py-6">
+        {/* Fluid width, 32px panel padding, no centred column. */}
+        <div className="px-8 py-8 pb-12">
           <TagSettings />
         </div>
       </div>

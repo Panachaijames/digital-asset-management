@@ -147,10 +147,10 @@ export function PresetGroupChips({
       <div className="space-y-3">
         {(fallbackGroups || []).map((g) => (
           <div key={g.group}>
-            <p className="mb-1 font-mono text-[10px] uppercase tracking-wider text-ink/40">
+            <p className="mb-2 text-xs font-medium text-muted">
               {g.group}
             </p>
-            <div className="flex flex-wrap gap-1">
+            <div className="flex flex-wrap gap-2">
               {g.tags.map((t) => {
                 const active = isActive(t);
                 return (
@@ -159,10 +159,10 @@ export function PresetGroupChips({
                     type="button"
                     onClick={() => onToggle(t)}
                     disabled={disabled}
-                    className={`rounded-sm px-2 py-0.5 font-mono text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                    className={`rounded-full px-3 py-1 text-xs font-medium transition-colors disabled:pointer-events-none disabled:opacity-50 ${
                       active
-                        ? "bg-blueprint-600 text-white"
-                        : "border border-line bg-card text-ink/60 hover:border-blueprint-400"
+                        ? "bg-text text-surface"
+                        : "border border-border text-muted hover:text-text"
                     }`}
                   >
                     {active ? "✓ " : ""}{t}
@@ -185,21 +185,21 @@ export function PresetGroupChips({
     <div className="space-y-3">
       {/* 1. Macro Portfolio Selection Chips */}
       <div>
-        <div className="flex items-center justify-between mb-1.5">
-          <p className="font-mono text-[10px] uppercase tracking-wider text-ink/40">
+        <div className="mb-2 flex items-center justify-between">
+          <p className="text-xs font-medium text-muted">
             Macro Portfolio
           </p>
           {activeMacro && (
             <button
               type="button"
               onClick={() => setSelectedMacro(null)}
-              className="text-[10px] font-mono text-blueprint-400 hover:underline"
+              className="text-xs font-medium text-muted transition-colors hover:text-text"
             >
               Show all categories
             </button>
           )}
         </div>
-        <div className="flex flex-wrap gap-1">
+        <div className="flex flex-wrap gap-2">
           {macros.map((m) => {
             const isSelected = activeMacro === m;
             const active = isActive(m);
@@ -212,10 +212,10 @@ export function PresetGroupChips({
                   setSelectedMacro(m);
                 }}
                 disabled={disabled}
-                className={`rounded-sm px-2.5 py-1 font-mono text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                className={`rounded-full px-3 py-1 text-xs font-medium transition-colors disabled:pointer-events-none disabled:opacity-50 ${
                   isSelected || active
-                    ? "bg-blueprint-600 text-white font-medium shadow-xs"
-                    : "border border-line bg-card text-ink/70 hover:border-blueprint-400 hover:text-ink"
+                    ? "bg-text text-surface"
+                    : "border border-border text-muted hover:text-text"
                 }`}
               >
                 {active ? "✓ " : ""}{m}
@@ -226,21 +226,21 @@ export function PresetGroupChips({
       </div>
 
       {/* 2. Core Sectors & Sub-Sector Typology Tags for the selected Macro Portfolio */}
-      <div className="space-y-2.5 pt-2 border-t border-line/40">
+      <div className="space-y-2 border-t border-border pt-2">
         {filteredRows.map((r) => (
-          <div key={`${r.macro}-${r.core}`} className="rounded-sm bg-card/40 p-2.5 border border-line/40">
-            <div className="flex items-center gap-2 mb-1.5">
-              <span className="font-mono text-[10px] uppercase tracking-wider text-ink/40">
-                {!activeMacro ? `${r.macro} → ` : ""}Core Sector:
+          <div key={`${r.macro}-${r.core}`} className="rounded border border-border bg-bg p-3">
+            <div className="mb-2 flex items-center gap-2">
+              <span className="text-xs font-medium text-muted">
+                {!activeMacro ? `${r.macro} · ` : ""}Core Sector:
               </span>
               <button
                 type="button"
                 onClick={() => onToggle(r.core)}
                 disabled={disabled}
-                className={`rounded-sm px-2 py-0.5 font-mono text-[11px] transition-colors ${
+                className={`rounded-full px-3 py-1 text-xs font-medium transition-colors disabled:pointer-events-none disabled:opacity-50 ${
                   isActive(r.core)
-                    ? "bg-blueprint-600 text-white font-medium"
-                    : "bg-panel border border-line text-blueprint-400 hover:border-blueprint-400"
+                    ? "bg-text text-surface"
+                    : "border border-border text-muted hover:text-text"
                 }`}
               >
                 {isActive(r.core) ? "✓ " : ""}{r.core}
@@ -248,7 +248,7 @@ export function PresetGroupChips({
             </div>
 
             {r.tags && r.tags.length > 0 && (
-              <div className="flex flex-wrap gap-1 pl-1">
+              <div className="flex flex-wrap gap-2 pl-1">
                 {r.tags.map((t) => {
                   const active = isActive(t);
                   return (
@@ -257,10 +257,10 @@ export function PresetGroupChips({
                       type="button"
                       onClick={() => onToggle(t)}
                       disabled={disabled}
-                      className={`rounded-sm px-2 py-0.5 font-mono text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                      className={`rounded-full px-3 py-1 text-xs font-medium transition-colors disabled:pointer-events-none disabled:opacity-50 ${
                         active
-                          ? "bg-blueprint-600 text-white font-medium"
-                          : "border border-line bg-card text-ink/70 hover:border-blueprint-400 hover:text-ink"
+                          ? "bg-text text-surface"
+                          : "border border-border text-muted hover:text-text"
                       }`}
                     >
                       {active ? "✓ " : ""}{t}

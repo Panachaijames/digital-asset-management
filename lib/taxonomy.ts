@@ -211,15 +211,15 @@ export function macroForCore(
   return null;
 }
 
-// Normalises a list of free-text tags: lower-cased, trimmed, de-duplicated,
-// non-empty, capped. Accepts anything (tampered/AI input) without throwing.
+// Normalises a list of free-text tags: lower-cased, trimmed, leading '#' stripped,
+// de-duplicated, non-empty, capped. Accepts anything (tampered/AI input) without throwing.
 export function normalizeTags(input: unknown, max = 12): string[] {
   const arr = Array.isArray(input) ? input : [];
   const seen = new Set<string>();
   const out: string[] = [];
   for (const t of arr) {
     if (typeof t !== "string") continue;
-    const tag = t.trim().toLowerCase();
+    const tag = t.trim().replace(/^#+/, "").toLowerCase();
     if (!tag || seen.has(tag)) continue;
     seen.add(tag);
     out.push(tag);

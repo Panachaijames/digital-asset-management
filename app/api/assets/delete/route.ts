@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAssetById } from "@/lib/api/search";
 import { trashDriveFile } from "@/lib/googleDrive";
 import { supabaseAdmin } from "@/lib/supabase";
+import { clearTagCountCache } from "@/lib/tagCounts";
 
 export const runtime = "nodejs";
 
@@ -77,5 +78,8 @@ export async function POST(request: NextRequest) {
   console.log(
     `[browse] bulk delete: ${deleted.length} deleted, ${failures.length} failed`
   );
+  // Tag counts changed — drop the cached facet list.
+  clearTagCountCache();
+
   return NextResponse.json({ deleted, failures });
 }

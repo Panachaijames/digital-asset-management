@@ -6,7 +6,7 @@ no SDK needed, only `GET` and `POST`.
 
 | | |
 |---|---|
-| Base URL | `https://dwp-dam-4w57ydlk6q-eu.a.run.app` |
+| Base URL | `https://dwp-dam-s2r2rmdlzq-eu.a.run.app` |
 | Your API key | You receive it separately from Panachai (panachai.t@dwp.com) — it is not in this document |
 | Your permissions | `read+write` — search, display, upload, edit, delete |
 
@@ -36,7 +36,7 @@ Rules:
 
 ```bash
 curl -H "x-api-key: YOUR_KEY" \
-  "https://dwp-dam-4w57ydlk6q-eu.a.run.app/api/v1/assets?limit=2"
+  "https://dwp-dam-s2r2rmdlzq-eu.a.run.app/api/v1/assets?limit=2"
 ```
 
 You should get JSON with a `data` array of image records. If you get `401`,
@@ -62,6 +62,7 @@ Two ways to send the key; both are equivalent:
 | `GET` | `/api/v1/assets/{id}/thumbnail` | Preview image (`?size=320`, `640` (default) or `1024`) |
 | `GET` | `/api/v1/tags` | All tags in use, with counts — good for filter dropdowns |
 | `GET` | `/api/v1/presets` | The preset tag library (the DAM's tag menu), grouped |
+| `GET` | `/api/v1/folders` | Folder paths — to find a folder or check one exists |
 
 ### Search parameters (`GET /api/v1/assets`)
 
@@ -76,9 +77,22 @@ All optional; combine freely.
 | `sub` | Comma-separated Sub-Sectors; must have all | `sub=Luxury+Resort` |
 | `path` | Exact folder path | `path=dwp_Digital_Asset/ProjectX` |
 | `pathPrefix` | Folder + all its subfolders | `pathPrefix=dwp_Digital_Asset/ProjectX` |
+| `studio` | dwp studio / project location | `studio=bangkok` |
 | `sort` | `newest` (default) or `oldest` | `sort=oldest` |
 | `limit` | Page size, default 60, max 100 | `limit=24` |
 | `offset` | Skip N results (for paging) | `offset=24` |
+
+**Valid `studio=` values** — a project’s studio comes from the location folder
+in its Drive path, matched on a whole path segment. The full list:
+
+`australia` · `bahrain` · `bangkok` · `china` · `dubai` · `ho-chi-minh-city` · `hong-kong` · `malaysia` · `myanmar` · `new-zealand` · `philippines` · `singapore` · `united-states`
+
+Anything else is a `400 bad_request` that lists these back to you. A city name
+is used only where dwp has a single studio for that location; `australia`
+covers several studios the folder path cannot tell apart. Roughly 8% of the
+library sits outside any location folder and so matches no `studio` at all.
+
+
 
 ### What an image record looks like
 
@@ -104,7 +118,7 @@ All optional; combine freely.
 ### Recipe: an image grid
 
 ```js
-const DAM = "https://dwp-dam-4w57ydlk6q-eu.a.run.app";
+const DAM = "https://dwp-dam-s2r2rmdlzq-eu.a.run.app";
 const KEY = process.env.DAM_API_KEY; // or however your app loads config
 
 const res = await fetch(`${DAM}/api/v1/assets?tags=exterior&limit=24`, {
@@ -126,7 +140,7 @@ cache freely on your side too.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/v1/folders` | Create a folder |
+| `POST` | `/api/v1/folders` | Create a folder (nested locations created as needed) |
 | `POST` | `/api/v1/assets` | Upload a new image |
 | `POST` | `/api/v1/assets/{id}/update` | Rename / re-tag an image |
 | `POST` | `/api/v1/assets/{id}/replace` | Swap the image file (same id + URLs) |
@@ -149,12 +163,58 @@ await fetch(`${DAM}/api/v1/folders`, {
   method: "POST",
   headers: { "x-api-key": KEY, "content-type": "application/json" },
   body: JSON.stringify({
-    parentPath: "dwp_Digital_Asset/ProjectX", // must already exist; starts with the Shared Drive name
-    name: "Interiors",
+    name: "Interiors",                        // the folder to create
+    location: "dwp_Digital_Asset/ProjectX",   // where to put it; starts with the Shared Drive name
   }),
 });
-// → { "data": { "path": "dwp_Digital_Asset/ProjectX/Interiors", "created": true } }
+// → { "data": { "path": "dwp_Digital_Asset/ProjectX/Interiors", "name": "Interiors",
+//               "location": "dwp_Digital_Asset/ProjectX", "created": true, "createdParents": [] } }
 ```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `name` | yes | The folder to create. Slashes mean nesting: `"ProjectY/Interiors"` creates both levels. |
+| `location` | yes | Where to create it, starting with the Shared Drive name. (`parentPath` is the old name for this field and still works.) |
+| `createParents` | no | Missing folders in `location` are created too (default `true`). Pass `false` to make the call fail unless `location` already exists — safer against typos. |
+
+Response fields: `path` (the new folder), `created` (`false` = it already
+existed), and `createdParents` — any parent folders the call had to create
+along the way. If `createdParents` comes back non-empty when you didn't expect
+it, you probably have a typo in `location`.
+
+One call can build a whole branch:
+
+```js
+// creates ProjectY and Interiors and 2026 if they don't exist yet
+body: JSON.stringify({
+  name: "2026",
+  location: "dwp_Digital_Asset/ProjectY/Interiors",
+});
+```
+
+### Find a folder
+
+`GET /api/v1/folders` lists folder paths, so you can check what exists instead
+of guessing (needs only a `read` key):
+
+| Param | Meaning | Example |
+|---|---|---|
+| `location` | Limit to this folder and its subfolders | `location=dwp_Digital_Asset/ProjectX` |
+| `depth` | How many levels below it (`1` = immediate children only) | `depth=1` |
+| `q` | Case-insensitive substring match on the path | `q=interiors` |
+| `limit` | Max paths returned, default 500, max 2000 | `limit=100` |
+
+```js
+const { data, meta } = await (await fetch(
+  `${DAM}/api/v1/folders?location=dwp_Digital_Asset/ProjectX&depth=1`,
+  { headers: { "x-api-key": KEY } }
+)).json();
+// data.paths = ["dwp_Digital_Asset/ProjectX", "dwp_Digital_Asset/ProjectX/Interiors", ...]
+// meta = { count: 2, total: 2, limit: 500 }   ← total > count means more matched than `limit` returned
+```
+
+New folders show up here right away; other DAM-side folder changes can take up
+to a minute (server cache).
 
 ### Upload an image
 
@@ -174,8 +234,14 @@ const res = await fetch(`${DAM}/api/v1/assets`, {
 const { data } = await res.json(); // the new image record, incl. its URLs
 ```
 
-The DAM's sector fields (`macro_portfolio` etc.) are derived automatically
-from your tags. Several images = several requests (parallel is fine).
+By default, the DAM automatically analyzes every uploaded image with Gemini
+Vision AI to generate ~14+ rich architectural & interior tags (materials,
+lighting, space type, architectural typologies, design style) and populates
+`macro_portfolio`, `core_sector`, and `sub_sectors`. Any `tags` you send are
+preserved, cleaned of `#`, and merged with the AI tags. If you ever want to
+skip AI auto-tagging, pass `autoTag: "false"` in the form.
+
+Several images = several requests (parallel is fine).
 
 ⚠️ **Don't blind-retry a timed-out upload** — it may have succeeded, and
 retrying creates a duplicate. Search for the file name first.
@@ -288,7 +354,9 @@ Every error has the same shape:
 ## 7. Limits, in one place
 
 - Uploads: **one image per request**, `image/*` types only, **max 30 MB**.
-- Upload destination folder must already exist (create it via `/folders`).
+- Upload destination folder must already exist (create it via `/folders`) —
+  only folder creation auto-creates missing levels, never upload.
+- Folder listing: `limit` max 2000 paths per call.
 - `limit` max 100 per search page; use `offset` to page.
 - Tag search is AND — `tags=a,b` means images having *both*.
 - No webhooks — poll (e.g. `sort=newest` + your own bookmark) if you need to

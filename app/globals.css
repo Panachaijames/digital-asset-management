@@ -3,85 +3,158 @@
 @tailwind utilities;
 
 @layer base {
-  /* Theme tokens as RGB triplets so Tailwind opacity modifiers (text-ink/40)
-     keep working — tailwind.config.ts maps them via
-     rgb(var(--ink) / <alpha-value>). :root holds the light theme; .dark
-     (applied by components/ThemeToggle.tsx and the inline no-flash script in
-     app/layout.tsx) swaps in the original dark-console palette. */
+  /* ---------------------------------------------------------------------
+     dwp.intelligence UI Standard — the eight tokens.
+     Source: docs/dwp_Intelligence_UI_Consistency_Review.md §5.2, whose hex
+     values are taken from docs/dwp_Studio_UI_System.md.
+
+         --dwp-bg       #F7F7F5   page ground
+         --dwp-surface  #FFFFFF   cards, sidebar, top bar
+         --dwp-text     #2C2C2A   body
+         --dwp-muted    #5F5E5A   secondary text
+         --dwp-accent   #A5680F   primary action, active tab
+         --dwp-border   #D9D7CE   every 1px rule
+         --dwp-on-accent#FFFFFF   text on an accent fill
+         --dwp-danger   #7E2B25   destructive (gap 10)
+
+     Written as RGB triplets, not hex, because the standard's own shell code
+     needs `bg-accent/5` for an active nav item and a bare `var(--dwp-accent)`
+     cannot carry a Tailwind opacity modifier. The -05/-08/-12/-25 steps are
+     the accent pre-mixed over the ground for the places that need an opaque
+     tint (signal fills, icon squares, badges) rather than a translucent one.
+
+     Appearance is Light, Dark or System. Light is :root, Dark is `.dark`, and
+     System is `.claude` — the warm cream/coral palette, kept as a deliberate
+     local exception to the standard (see the note on that block). Only colour
+     changes between the three, and all three define the same eight tokens, so
+     no component knows or cares which mode it is in.
+     --------------------------------------------------------------------- */
   :root {
-    --paper: 242 244 248;
-    --ink: 28 37 48;
-    --card: 255 255 255;
-    --panel: 250 251 253;
-    --rail: 233 237 243;
-    --line: 214 220 229;
-    --blueprint: 47 107 232;
-    --blueprint-50: 233 239 252;
-    --blueprint-100: 220 231 250;
-    --blueprint-200: 196 215 248;
-    --blueprint-400: 74 128 238;
-    --blueprint-600: 47 107 232;
-    --blueprint-700: 29 79 184;
+    --dwp-bg: 247 247 245; /* #F7F7F5 */
+    --dwp-surface: 255 255 255; /* #FFFFFF */
+    --dwp-text: 44 44 42; /* #2C2C2A */
+    --dwp-muted: 95 94 90; /* #5F5E5A */
+    --dwp-accent: 165 104 15; /* #A5680F */
+    --dwp-border: 217 215 206; /* #D9D7CE */
+    --dwp-on-accent: 255 255 255; /* #FFFFFF */
+    --dwp-danger: 126 43 37; /* #7E2B25 */
+
+    /* Accent mixed over the ground, for opaque tints and hover states. */
+    --dwp-accent-05: 243 240 234;
+    --dwp-accent-08: 240 236 227;
+    --dwp-accent-12: 237 230 217;
+    --dwp-accent-25: 227 211 188;
+    --dwp-accent-deep: 133 79 11; /* #854F0B — primary hover */
   }
+
   .dark {
-    --paper: 27 34 43;
-    --ink: 232 236 242;
-    --card: 35 44 54;
-    --panel: 22 28 35;
-    --rail: 12 16 19;
-    --line: 51 61 73;
-    --blueprint: 62 123 250;
-    --blueprint-50: 30 43 71;
-    --blueprint-100: 35 52 89;
-    --blueprint-200: 44 66 112;
-    --blueprint-400: 90 141 245;
-    --blueprint-600: 62 123 250;
-    --blueprint-700: 156 192 255;
+    --dwp-bg: 26 26 25; /* #1A1A19 */
+    --dwp-surface: 35 35 33; /* #232321 */
+    --dwp-text: 237 235 228; /* #EDEBE4 */
+    --dwp-muted: 163 161 154; /* #A3A19A */
+    --dwp-accent: 201 138 46; /* #C98A2E */
+    --dwp-border: 58 57 53; /* #3A3935 */
+    --dwp-on-accent: 26 26 25; /* #1A1A19 */
+    --dwp-danger: 208 101 92; /* #D0655C */
+
+    --dwp-accent-05: 35 32 26;
+    --dwp-accent-08: 40 35 27;
+    --dwp-accent-12: 47 39 28;
+    --dwp-accent-25: 70 54 30;
+    --dwp-accent-deep: 224 166 75;
   }
-  /* "System" mode in the theme toggle: Claude-style warm cream paper with
-     coral/terracotta accents (the blueprint-* tokens go orange here). */
+
+  /* "System" in the appearance control — the warm cream/coral palette.
+     A LOCAL EXCEPTION to the standard, kept by user decision (2026-08-07,
+     reaffirmed 2026-09-07). The standard rules that System follows the OS and
+     that no app carries a palette outside the eight tokens (gap 6), so this
+     is a deviation recorded rather than hidden — the fleet's own review says
+     to record a conflict instead of choosing silently.
+
+     It is expressed in the SAME eight tokens as Light and Dark, so it is a
+     re-colouring and nothing more. Coral #D97757 takes the accent role and
+     the ramp keeps the values the mode already had. */
   .claude {
-    --paper: 240 238 230;
-    --ink: 31 30 28;
-    --card: 253 252 250;
-    --panel: 250 249 245;
-    --rail: 234 230 218;
-    --line: 213 207 192;
-    --blueprint: 217 119 87;
-    --blueprint-50: 246 232 223;
-    --blueprint-100: 242 218 203;
-    --blueprint-200: 237 198 176;
-    --blueprint-400: 204 107 71;
-    --blueprint-600: 217 119 87;
-    --blueprint-700: 157 74 38;
+    --dwp-bg: 240 238 230; /* #F0EEE6 */
+    --dwp-surface: 253 252 250; /* #FDFCFA */
+    --dwp-text: 31 30 28; /* #1F1E1C */
+    --dwp-muted: 96 92 84; /* #605C54 */
+    --dwp-accent: 217 119 87; /* #D97757 */
+    --dwp-border: 213 207 192; /* #D5CFC0 */
+    --dwp-on-accent: 255 255 255; /* #FFFFFF */
+    --dwp-danger: 126 43 37; /* #7E2B25 */
+
+    --dwp-accent-05: 246 232 223;
+    --dwp-accent-08: 244 226 214;
+    --dwp-accent-12: 242 218 203;
+    --dwp-accent-25: 237 198 176;
+    --dwp-accent-deep: 157 74 38; /* #9D4A26 */
+  }
+
+  html {
+    font-variant-numeric: tabular-nums;
   }
 
   body {
-    @apply bg-paper text-ink font-body antialiased;
+    @apply bg-bg text-text font-sans text-sm antialiased;
   }
+
+  input,
+  button,
+  select,
+  textarea {
+    font-family: inherit;
+  }
+
+  /* 500 is the emphasis. Nothing in the app is bold. */
+  strong,
+  b {
+    font-weight: 500;
+  }
+
   ::selection {
-    @apply bg-blueprint-200 text-ink;
+    @apply bg-accent/20 text-text;
   }
-  /* Thin scrollbars to match the console look, in both themes. */
+
+  /* Hairline scrollbars, in the border token. */
   * {
     scrollbar-width: thin;
-    scrollbar-color: rgb(var(--line)) transparent;
+    scrollbar-color: rgb(var(--dwp-border)) transparent;
   }
   *::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
+    width: 6px;
+    height: 6px;
   }
   *::-webkit-scrollbar-thumb {
-    background: rgb(var(--line));
-    border-radius: 4px;
+    background: rgb(var(--dwp-border));
+    border-radius: 6px;
   }
   *::-webkit-scrollbar-track {
     background: transparent;
   }
 }
 
-@layer utilities {
-  .focus-ring {
-    @apply outline-none ring-2 ring-blueprint-400 ring-offset-2 ring-offset-paper;
+@layer components {
+  /* Status badge — accent at 5% fill, 25% border, 12px weight 500, sentence
+     case. The standard carries one badge, not one per state, so the four
+     variants below are now the same object; the state is carried by the
+     word, not by a hue. (Gap 12 is still open on this.) */
+  .badge-status {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-accent/25 bg-accent/5 px-2 py-0.5 text-xs font-medium text-text;
+  }
+  .badge-management,
+  .badge-release,
+  .badge-issued,
+  .badge-pending {
+    @apply border-accent/25 bg-accent/5 text-text;
+  }
+
+  /* Buttons — §5.6. Names kept as-is so call sites are untouched; the
+     "-dark" and "-green" suffixes are historical, the fills are the tokens. */
+  .btn-primary-dark {
+    @apply inline-flex items-center justify-center gap-2 rounded bg-accent px-3 py-2 text-sm font-medium text-on-accent transition-opacity hover:opacity-90 disabled:pointer-events-none disabled:opacity-50;
+  }
+  .btn-secondary-green {
+    @apply inline-flex items-center justify-center gap-2 rounded border border-border bg-surface px-3 py-2 text-sm font-medium text-text transition-colors hover:bg-bg disabled:pointer-events-none disabled:opacity-50;
   }
 }

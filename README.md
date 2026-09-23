@@ -15,12 +15,17 @@ app/
     folders/route.ts        GET  — lists Drive folders (supports drill-down via parentId)
     assets/route.ts         GET  — search/filter common_dam_assets by tag(s) and/or name
     tags/route.ts             GET  — distinct tags with counts, for the filter chips
+    slides/export/route.ts  POST — builds a Google Slides deck, one slide per asset
+    slides/image/route.ts   GET  — signed, short-lived image bytes for Google to fetch
 components/
   ImageUploader.tsx          Dropzone, queue, progress, results
   TagInput.tsx                Chip-style multi-tag entry
   FolderPicker.tsx             Drive folder browser with breadcrumb drill-down
 lib/
   googleDrive.ts               Service-account Drive client + upload/list helpers
+  googleSlides.ts              Slides deck creation + slide layout (EMU geometry)
+  signedImageUrl.ts            HMAC-signed expiring image URLs (for Slides)
+  publicUrl.ts                 Resolves the public origin Google fetches from
   supabase.ts                  Server-side Supabase client
   types.ts                     Shared TypeScript types
 supabase/
@@ -30,7 +35,9 @@ supabase/
 ## Setup
 
 ### 1. Google Cloud / Drive
-1. Create (or reuse) a Google Cloud project, enable the **Google Drive API**.
+1. Create (or reuse) a Google Cloud project, enable the **Google Drive API**
+   and — for the Slides export in `/browse` — the **Google Slides API**
+   (`gcloud services enable slides.googleapis.com`; `deploy.ps1` also does this).
 2. Create a **service account**, download its JSON key.
 3. In Google Drive, open the **Shared Drive** you want assets stored in and
    add the service account's email as a member with **Content Manager**
@@ -52,7 +59,16 @@ Copy `.env.local.example` → `.env.local` and fill in:
 - `GEMINI_API_KEY` (optional) — enables AI auto-classification of uploaded
   images into the dwp sector taxonomy via Google Gemini. Leave blank to disable
   (the manual taxonomy picker still works). Override the model with
-  `GEMINI_MODEL` (defaults to `gemini-3.5-flash`).
+  `GEMINI_MODEL` (defaults to `gemini-3.6-flash`).
+- `DAM_PUBLIC_BASE_URL` — this service's public address. Required for the Slides
+  export: Google fetches every image itself, so a `localhost` origin can't work.
+  Point a dev server at the deployed URL and Slides export works locally too.
+- `DAM_SLIDES_EXPORT_PATH` (optional) — Drive folder for exported decks. Default
+  `<SharedDrive>/Slide Exports`, created on first use.
+- `DAM_SLIDES_SHARE_WITH` (optional) — comma-separated emails granted writer on
+  each new deck. Not needed if the audience are members of the Shared Drive.
+- `DAM_SIGNING_SECRET` (optional) — HMAC key for the short-lived image URLs
+  Google fetches. Defaults to the service-account private key.
 
 ### 4. Run
 ```
@@ -79,6 +95,23 @@ npm run dev
   *all* selected tags (`tags @> ARRAY[...]`). The search box filters by file
   name. Everything queries Supabase, not Drive — Drive is only opened when
   you click through to an actual asset.
+- **Export to Google Slides** (`/browse` → **Select** → **Slides**): tick some
+  images and you get a presentation with **one slide per image**, in the order
+  the grid shows them. Name the deck, choose *Fit* (whole image inside a margin)
+  or *Fill* (full bleed, edges cropped off-slide), optionally print each file
+  name as a caption, and hit Create — you get a link straight to the deck.
+  Videos in the selection become embedded Drive players instead of stills.
+
+  The deck is created **inside the Shared Drive** (`<Drive>/Slide Exports` by
+  default), so it's owned by the drive and every member can open it — the
+  service account has no storage of its own to put it in. Google's Slides
+  servers place the images themselves by fetching each one from
+  `/api/slides/image`, which is why `DAM_PUBLIC_BASE_URL` must be reachable
+  from the internet; those URLs are HMAC-signed and expire in 30 minutes, long
+  after Slides has copied the bytes into the deck. Originals that Slides won't
+  accept (TIFF, PSD, 50 MB files) go in as Drive's own JPEG render, so they
+  work like everything else. Max 60 images per export; if one image can't be
+  placed the rest of the deck is still built and the failure is named.
 
 ## Notes for further development (Antigravity)
 

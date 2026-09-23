@@ -1,30 +1,21 @@
-import { google, type drive_v3 } from "googleapis";
+import type { drive_v3 } from "googleapis";
 import { Readable } from "stream";
+import {
+  getAuth,
+  getDriveClient,
+  listSharedDrives,
+  withDriveRetry,
+} from "./driveClient";
+import {
+  indexFindChild,
+  noteFolderCreated,
+  refreshFolderIndex,
+} from "./folderIndex";
 
-// Service account auth. The service account must be added as a member
-// (Content Manager or higher) of whichever Shared Drive holds your assets —
-// Drive API access to "My Drive" folders owned by a personal account does
-// not work with service accounts, so this assumes a Shared Drive.
-//
-// GOOGLE_SERVICE_ACCOUNT_EMAIL and GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY come
-// from a JSON key downloaded in Google Cloud Console for a service account
-// with the Drive API enabled on its project.
-function getAuth() {
-  const privateKey = (process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || "").replace(
-    /\\n/g,
-    "\n"
-  );
-
-  return new google.auth.JWT({
-    email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-    key: privateKey,
-    scopes: ["https://www.googleapis.com/auth/drive"],
-  });
-}
-
-export function getDriveClient() {
-  return google.drive({ version: "v3", auth: getAuth() });
-}
+// Auth, the API client, the Shared Drive list and the retry wrapper live in
+// lib/driveClient.ts (see the note there); re-exported so existing importers
+// keep working.
+export { getDriveClient, listSharedDrives, withDriveRetry };
 
 export interface DriveUploadResult {
   id: string;
@@ -140,41 +131,18 @@ export async function getDriveFileMetadata(fileId: string): Promise<{
   };
 }
 
-// Lists the Shared Drives the service account is a member of. These are the
-// top-level entries in the folder picker — a service account has no personal
-// "My Drive". Membership is sufficient; no domain-wide delegation is needed.
-export async function listSharedDrives() {
-  const drive = getDriveClient();
-  const drives: { id: string; name: string }[] = [];
-  let pageToken: string | undefined;
-  do {
-    const res = await drive.drives.list({
-      pageSize: 100,
-      fields: "nextPageToken, drives(id, name)",
-      pageToken,
-    });
-    for (const d of res.data.drives ?? []) {
-      if (d.id && d.name) drives.push({ id: d.id, name: d.name });
-    }
-    pageToken = res.data.nextPageToken ?? undefined;
-  } while (pageToken);
-  return drives;
-}
-
 // Escapes a value for embedding in a Drive query string.
 function escapeQueryValue(v: string) {
   return v.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
 
-// Finds a folder named `name` directly under `parentId`, or null if absent.
-// Never creates. (Note: Drive allows duplicate-named siblings; this returns
-// the first match — the app never creates duplicates so this is only reachable
-// via folders made directly in Drive.)
-async function findFolder(
+// Drive's own name+parent query. Consistent within a few seconds of a change
+// (unlike the whole-drive listing), but not instantly — hence the index below.
+async function queryFolder(
   driveId: string,
   parentId: string,
   name: string
-): Promise<string | null> {
+): Promise<{ id: string; name: string } | null> {
   const drive = getDriveClient();
   const res = await drive.files.list({
     corpora: "drive",
@@ -182,35 +150,131 @@ async function findFolder(
     supportsAllDrives: true,
     includeItemsFromAllDrives: true,
     q: `name = '${escapeQueryValue(name)}' and '${parentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
-    fields: "files(id)",
+    fields: "files(id, name)",
     pageSize: 1,
   });
-  return res.data.files?.[0]?.id ?? null;
+  const f = res.data.files?.[0];
+  return f?.id ? { id: f.id, name: f.name ?? name } : null;
 }
 
+// How long to wait before asking Drive a second time about a folder that isn't
+// there yet: another Cloud Run instance may have created it moments ago, and
+// Drive's name query trails a creation by a few seconds.
+const MISS_RETRY_DELAY_MS = 1_500;
+
+// Finds a folder named `name` directly under `parentId`, or null if absent.
+// Never creates. Asks the change-feed-backed folder index first (exact, and
+// aware of anything this process just created or trashed), then Drive's name
+// query; a hit from Drive that the index lacked is remembered. With
+// `retryOnMiss`, a miss is re-checked once after a short pause — for the
+// find-only walks, where "not there" becomes a hard error.
+// (Note: Drive allows duplicate-named siblings; this returns the first match.)
+async function findFolder(
+  driveId: string,
+  parentId: string,
+  name: string,
+  options: { retryOnMiss?: boolean } = {}
+): Promise<{ id: string; name: string } | null> {
+  const indexed = await indexFindChild(driveId, parentId, name);
+  if (indexed) return indexed;
+
+  const remember = (hit: { id: string; name: string }) => {
+    noteFolderCreated(driveId, { id: hit.id, name: hit.name, parent: parentId });
+    return hit;
+  };
+
+  const queried = await queryFolder(driveId, parentId, name);
+  if (queried) return remember(queried);
+  if (!options.retryOnMiss) return null;
+
+  await new Promise((r) => setTimeout(r, MISS_RETRY_DELAY_MS));
+  await refreshFolderIndex();
+  const indexedLater = await indexFindChild(driveId, parentId, name);
+  if (indexedLater) return indexedLater;
+  const queriedLater = await queryFolder(driveId, parentId, name);
+  return queriedLater ? remember(queriedLater) : null;
+}
+
+// In-flight find-or-creates on this instance, keyed by drive + parent +
+// lower-cased name, so two concurrent requests for the same folder (an API
+// consumer firing parallel uploads that each "ensure" the project folder)
+// share one create instead of racing to make two.
+const pendingCreates = new Map<
+  string,
+  Promise<{ id: string; name: string; created: boolean }>
+>();
+
 // Finds a folder named `name` directly under `parentId`, creating it if it
-// doesn't exist. Returns its ID and whether it was newly created (so an
-// explicit "New folder" action can warn instead of silently reusing).
+// doesn't exist. Returns its id, its REAL name (Drive matches names
+// case-insensitively, so "australia" can find "Australia") and whether it was
+// newly created (so an explicit "New folder" action can warn instead of
+// silently reusing). The index-first lookup is what stops two quick calls
+// from producing duplicate same-named siblings while Drive's name query still
+// lags the first create; the single-flight map covers concurrent ones on the
+// same instance. Concurrent creates on DIFFERENT instances inside the change
+// feed's ~4 s propagation window can still both succeed — see the API guides,
+// which ask consumers not to call folder creation in parallel.
 async function findOrCreateFolder(
   driveId: string,
   parentId: string,
   name: string
-): Promise<{ id: string; created: boolean }> {
-  const existing = await findFolder(driveId, parentId, name);
-  if (existing) return { id: existing, created: false };
+): Promise<{ id: string; name: string; created: boolean }> {
+  const key = `${driveId}/${parentId}/${name.toLowerCase()}`;
+  const pending = pendingCreates.get(key);
+  if (pending) {
+    // The other caller did the work; for this caller the folder now exists.
+    const r = await pending;
+    return { ...r, created: false };
+  }
+  const task = (async () => {
+    const existing = await findFolder(driveId, parentId, name);
+    if (existing) return { ...existing, created: false };
+    // Last look before creating: one forced change-feed poll catches a folder
+    // another instance made a few seconds ago that Drive's name query hasn't
+    // surfaced yet. Shrinks the duplicate window to the feed's own latency.
+    await refreshFolderIndex();
+    const lateHit = await indexFindChild(driveId, parentId, name);
+    if (lateHit) return { ...lateHit, created: false };
 
-  const drive = getDriveClient();
-  const created = await drive.files.create({
-    requestBody: {
-      name,
-      mimeType: "application/vnd.google-apps.folder",
-      parents: [parentId],
-    },
-    fields: "id",
-    supportsAllDrives: true,
-  });
-  if (!created.data.id) throw new Error(`Could not create folder "${name}".`);
-  return { id: created.data.id, created: true };
+    const drive = getDriveClient();
+    const created = await drive.files.create({
+      requestBody: {
+        name,
+        mimeType: "application/vnd.google-apps.folder",
+        parents: [parentId],
+      },
+      fields: "id, name",
+      supportsAllDrives: true,
+    });
+    if (!created.data.id) throw new Error(`Could not create folder "${name}".`);
+    const realName = created.data.name ?? name;
+    // Visible in the tree, and to the next lookup, immediately.
+    noteFolderCreated(driveId, {
+      id: created.data.id,
+      name: realName,
+      parent: parentId,
+    });
+    return { id: created.data.id, name: realName, created: true };
+  })();
+  pendingCreates.set(key, task);
+  try {
+    return await task;
+  } finally {
+    pendingCreates.delete(key);
+  }
+}
+
+// Thrown by the find-only path walks when a segment isn't in Drive. The
+// message is the one the app's UI wants ("your tree is stale, refresh"); the
+// `segment` field lets the external API phrase its own ("create it first"),
+// since for an API caller the folder usually never existed at all.
+export class MissingFolderError extends Error {
+  constructor(readonly segment: string) {
+    super(
+      `Folder "${segment}" no longer exists in Drive — it may have been moved, renamed, or deleted. Refresh and try again.`
+    );
+    this.name = "MissingFolderError";
+  }
 }
 
 // Resolves a nested folder path under `rootParentId` WITHOUT creating anything,
@@ -222,18 +286,17 @@ async function resolveFolderPath(
   driveId: string,
   rootParentId: string,
   segments: string[]
-): Promise<string> {
+): Promise<{ id: string; names: string[] }> {
   let parentId = rootParentId;
+  // Drive's real spelling of each segment (names match case-insensitively).
+  const names: string[] = [];
   for (const seg of segments) {
-    const id = await findFolder(driveId, parentId, seg);
-    if (!id) {
-      throw new Error(
-        `Folder "${seg}" no longer exists in Drive — it may have been moved, renamed, or deleted. Refresh and try again.`
-      );
-    }
-    parentId = id;
+    const hit = await findFolder(driveId, parentId, seg, { retryOnMiss: true });
+    if (!hit) throw new MissingFolderError(seg);
+    parentId = hit.id;
+    names.push(hit.name);
   }
-  return parentId;
+  return { id: parentId, names };
 }
 
 // Walks (creating as needed) a nested folder path under `rootParentId` and
@@ -263,21 +326,56 @@ export async function ensureFolderPath(
 
 // Creates a folder named `name` directly under `parentId` (find-or-create, so
 // repeated calls with the same name don't produce duplicates). Returns the
-// folder's id, name, and whether it was newly created.
+// folder's id, its real name as stored in Drive, and whether it was newly
+// created.
 export async function createDriveFolder(
   driveId: string,
   parentId: string,
   name: string
 ): Promise<{ id: string; name: string; created: boolean }> {
-  const { id, created } = await findOrCreateFolder(driveId, parentId, name);
-  return { id, name, created };
+  return findOrCreateFolder(driveId, parentId, name);
+}
+
+// Walks a nested folder path under `rootParentId`, CREATING any segment that
+// doesn't exist yet (mkdir -p), and reports which ones it had to create so the
+// caller can show/log them. Same walk as ensureFolderPath, but path-aware:
+// `rootPath` is the human path of rootParentId so created segments come back
+// as full paths.
+async function ensureFolderPathTracked(
+  driveId: string,
+  rootParentId: string,
+  segments: string[],
+  rootPath: string
+): Promise<{ parentId: string; createdParents: string[]; path: string }> {
+  let parentId = rootParentId;
+  let path = rootPath;
+  const createdParents: string[] = [];
+  for (const seg of segments) {
+    const result = await findOrCreateFolder(driveId, parentId, seg);
+    // Drive's real name, not the caller's spelling (case may differ).
+    path = `${path}/${result.name}`;
+    if (result.created) createdParents.push(path);
+    parentId = result.id;
+  }
+  return { parentId, createdParents, path };
+}
+
+export interface CreateFolderOptions {
+  // Create missing folders along `parentPath` instead of failing on the first
+  // one that isn't there. Off by default: the app's own "New folder" button
+  // wants a stale tree (parent renamed/deleted in Drive) to surface a
+  // "refresh" error rather than silently rebuilding empty parents. The
+  // external API turns it on so a consumer can create a whole branch —
+  // "Projects/Marketing Hub/Q3" — in one call.
+  createParents?: boolean;
 }
 
 // Creates a new folder named `name` under the folder identified by the
 // human-readable `parentPath` (e.g. "dwp_Digital_Asset/ProjectX"). The first
 // path segment is the Shared Drive name. Returns the new folder's full path
 // and whether it was newly created (false = a folder with that name already
-// existed there).
+// existed there), plus the paths of any parents created along the way
+// (only ever non-empty with `createParents: true`).
 //
 // KNOWN LIMITATION: folders are addressed by name-path here. If you ever have
 // two Shared Drives with the SAME name, or two sibling folders with the same
@@ -287,13 +385,15 @@ export async function createDriveFolder(
 // uniquely-named Shared Drive.
 export async function createFolderAtPath(
   parentPath: string,
-  name: string
+  name: string,
+  options: CreateFolderOptions = {}
 ): Promise<{
   id: string;
   name: string;
   path: string;
   driveId: string;
   created: boolean;
+  createdParents: string[];
 }> {
   const clean = name.trim();
   if (!clean || clean.includes("/")) {
@@ -310,80 +410,53 @@ export async function createFolderAtPath(
 
   const [driveName, ...rest] = segments;
   const drives = await listSharedDrives();
-  const drive = drives.find((d) => d.name === driveName);
+  // Case-insensitive, like Drive's own name matching for folders.
+  const drive =
+    drives.find((d) => d.name === driveName) ??
+    drives.find((d) => d.name.toLowerCase() === driveName.toLowerCase());
   if (!drive) throw new Error(`Shared Drive "${driveName}" not found.`);
 
-  // Find-only walk of the parent chain: a stale path (parent deleted/renamed)
-  // fails clearly instead of silently recreating empty folders.
-  const parentId = rest.length
-    ? await resolveFolderPath(drive.id, drive.id, rest)
-    : drive.id;
+  // The Shared Drive itself is never created — only folders inside it.
+  let parentId = drive.id;
+  let createdParents: string[] = [];
+  // The parent's path as Drive spells it — the caller's `parentPath` may
+  // differ in case, and the returned path is what callers store and reuse.
+  let realParentPath = driveName;
+  if (rest.length) {
+    if (options.createParents) {
+      const walked = await ensureFolderPathTracked(
+        drive.id,
+        drive.id,
+        rest,
+        driveName
+      );
+      parentId = walked.parentId;
+      createdParents = walked.createdParents;
+      realParentPath = walked.path;
+    } else {
+      // Find-only walk of the parent chain: a stale path (parent
+      // deleted/renamed) fails clearly instead of silently recreating empty
+      // folders.
+      const resolved = await resolveFolderPath(drive.id, drive.id, rest);
+      parentId = resolved.id;
+      realParentPath = [driveName, ...resolved.names].join("/");
+    }
+  }
 
   const created = await createDriveFolder(drive.id, parentId, clean);
   return {
     id: created.id,
     name: created.name,
-    path: `${parentPath}/${created.name}`,
+    path: `${realParentPath}/${created.name}`,
     driveId: drive.id,
     created: created.created,
+    createdParents,
   };
 }
 
-// Walks every Shared Drive the service account can access and returns the full
-// human-readable path of every folder (drive name as the root segment), so the
-// media-library tree reflects the real Drive structure — including empty
-// folders. Efficient: one paginated files.list per drive (all folders at once),
-// then paths are reconstructed from the parent chain, not a call per folder.
-export async function listAllFolderPaths(): Promise<string[]> {
-  const drive = getDriveClient();
-  const drives = await listSharedDrives();
-  const allPaths = new Set<string>();
-
-  for (const d of drives) {
-    const folders: { id: string; name: string; parent: string | null }[] = [];
-    let pageToken: string | undefined;
-    do {
-      const res = await drive.files.list({
-        corpora: "drive",
-        driveId: d.id,
-        supportsAllDrives: true,
-        includeItemsFromAllDrives: true,
-        q: "mimeType = 'application/vnd.google-apps.folder' and trashed = false",
-        fields: "nextPageToken, files(id, name, parents)",
-        pageSize: 1000,
-        pageToken,
-      });
-      for (const f of res.data.files ?? []) {
-        if (f.id && f.name) {
-          folders.push({ id: f.id, name: f.name, parent: f.parents?.[0] ?? null });
-        }
-      }
-      pageToken = res.data.nextPageToken ?? undefined;
-    } while (pageToken);
-
-    const byId = new Map(folders.map((f) => [f.id, f]));
-    const pathCache = new Map<string, string>();
-    const resolve = (id: string, seen: Set<string>): string => {
-      const cached = pathCache.get(id);
-      if (cached) return cached;
-      const f = byId.get(id);
-      if (!f || seen.has(id)) return d.name; // missing/cyclic → treat as root
-      seen.add(id);
-      const parentPath =
-        f.parent && f.parent !== d.id && byId.has(f.parent)
-          ? resolve(f.parent, seen)
-          : d.name;
-      const path = `${parentPath}/${f.name}`;
-      pathCache.set(id, path);
-      return path;
-    };
-
-    allPaths.add(d.name); // the drive root itself
-    for (const f of folders) allPaths.add(resolve(f.id, new Set()));
-  }
-
-  return Array.from(allPaths).sort();
-}
+// The whole-drive folder listing that used to live here (listAllFolderPaths)
+// is now the bootstrap step of lib/folderIndex.ts — see the note there on why
+// it can't be trusted for anything recent.
 
 // Lists folders directly under `parentId` within the given Shared Drive.
 // For the root of a drive, pass parentId = driveId (a Shared Drive's root
@@ -413,7 +486,7 @@ export async function listDriveFolders(driveId: string, parentId: string) {
   return folders;
 }
 
-// One media (image/video) file found by a bulk scan, with enough metadata to
+// One media (image/video/PDF) file found by a bulk scan, with enough metadata to
 // register it as a DAM asset without any further per-file Drive calls.
 export interface DriveImageFile {
   id: string;
@@ -424,50 +497,6 @@ export interface DriveImageFile {
   thumbnailLink: string | null;
   folderId: string; // direct parent folder
   relativePath: string; // folder path below the scan root, "" = in the root
-}
-
-// Retry transient Google Drive API / network errors (fetch failed, ECONNRESET, 429, 503, 500)
-async function withDriveRetry<T>(fn: () => Promise<T>, attempts = 5): Promise<T> {
-  let delay = 500;
-  for (let i = 0; ; i++) {
-    try {
-      return await fn();
-    } catch (err) {
-      const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
-      const isNetworkError =
-        msg.includes("fetch failed") ||
-        msg.includes("socket") ||
-        msg.includes("econnreset") ||
-        msg.includes("econnrefused") ||
-        msg.includes("epipe") ||
-        msg.includes("etimedout") ||
-        msg.includes("enotfound") ||
-        msg.includes("eai_again") ||
-        msg.includes("und_err") ||
-        msg.includes("other side closed") ||
-        msg.includes("network") ||
-        msg.includes("timeout") ||
-        msg.includes("econnaborted") ||
-        msg.includes("ratelimitexceeded");
-      const e = err as { status?: number; code?: number };
-      const status = e?.status ?? e?.code;
-      const isTransientStatus =
-        status === 429 ||
-        status === 500 ||
-        status === 502 ||
-        status === 503 ||
-        status === 504;
-
-      if ((!isNetworkError && !isTransientStatus) || i >= attempts - 1) {
-        throw err;
-      }
-      console.warn(
-        `Drive API call failed (${msg}), retrying attempt ${i + 1}/${attempts}...`
-      );
-      await new Promise((r) => setTimeout(r, delay + Math.random() * 250));
-      delay *= 2;
-    }
-  }
 }
 
 // One pending folder in a resumable scan walk: its Drive ID plus its path
@@ -562,7 +591,7 @@ export async function scanImageFilesChunk(
           driveId,
           supportsAllDrives: true,
           includeItemsFromAllDrives: true,
-          q: `(${parentQuery}) and (mimeType contains 'image/' or mimeType contains 'video/') and trashed = false`,
+          q: `(${parentQuery}) and (mimeType contains 'image/' or mimeType contains 'video/' or mimeType = 'application/pdf') and trashed = false`,
           fields:
             "nextPageToken, files(id, name, mimeType, size, webViewLink, thumbnailLink, parents)",
           pageSize: 1000,
@@ -610,11 +639,14 @@ export async function resolveFolderPathToId(
 
   const [driveName, ...rest] = segments;
   const drives = await listSharedDrives();
-  const drive = drives.find((d) => d.name === driveName);
+  // Case-insensitive, like Drive's own name matching for folders.
+  const drive =
+    drives.find((d) => d.name === driveName) ??
+    drives.find((d) => d.name.toLowerCase() === driveName.toLowerCase());
   if (!drive) throw new Error(`Shared Drive "${driveName}" not found.`);
 
   const folderId = rest.length
-    ? await resolveFolderPath(drive.id, drive.id, rest)
+    ? (await resolveFolderPath(drive.id, drive.id, rest)).id
     : drive.id;
   return { driveId: drive.id, folderId };
 }
@@ -680,6 +712,84 @@ export async function getDriveFileBuffer(
   );
   const buffer = Buffer.from(res.data as ArrayBuffer);
   return { buffer, mimeType: meta.mimeType };
+}
+
+// Shape of one media file as far as slide layout cares: what it is, and its
+// aspect ratio (width / height) so an image can be fitted to a slide without
+// distortion. `aspect` is null when Drive has no dimensions for the file —
+// callers fall back to measuring the thumbnail, or to a sane default.
+export async function getDriveMediaShape(fileId: string): Promise<{
+  mimeType: string;
+  aspect: number | null;
+  thumbnailLink: string | null;
+}> {
+  const drive = getDriveClient();
+  const res = await withDriveRetry(
+    () =>
+      drive.files.get(
+        {
+          fileId,
+          fields:
+            "mimeType, imageMediaMetadata(width, height), videoMediaMetadata(width, height), thumbnailLink",
+          supportsAllDrives: true,
+        },
+        { timeout: 20_000 }
+      ),
+    3
+  );
+  const d = res.data;
+  const dims = d.imageMediaMetadata ?? d.videoMediaMetadata ?? null;
+  const w = Number(dims?.width) || 0;
+  const h = Number(dims?.height) || 0;
+  return {
+    mimeType: d.mimeType ?? "application/octet-stream",
+    aspect: w > 0 && h > 0 ? w / h : null,
+    thumbnailLink: d.thumbnailLink ?? null,
+  };
+}
+
+// Fetches Drive's pre-rendered thumbnail for a file at roughly `size` px on its
+// longest edge, or null when Drive has none. Always a raster image (JPEG/PNG)
+// even when the original is a TIFF or PSD, which is exactly what the Slides API
+// needs. `thumbnailLink` may be passed in to save a metadata round trip; stored
+// links expire within hours, so only ever pass a freshly-fetched one.
+export async function getDriveThumbnailBytes(
+  fileId: string,
+  size: number,
+  thumbnailLink?: string | null
+): Promise<{ buffer: Buffer; mimeType: string } | null> {
+  let link = thumbnailLink ?? null;
+  if (!link) {
+    const drive = getDriveClient();
+    const res = await withDriveRetry(
+      () =>
+        drive.files.get(
+          { fileId, fields: "thumbnailLink", supportsAllDrives: true },
+          { timeout: 20_000 }
+        ),
+      3
+    );
+    link = res.data.thumbnailLink ?? null;
+  }
+  if (!link) return null;
+
+  // Thumbnail links end in a size directive (e.g. "=s220") — ask for the size
+  // we actually want. The URL is itself the (short-lived) credential.
+  const url = /=s\d+(-c)?$/.test(link)
+    ? link.replace(/=s\d+(-c)?$/, `=s${size}`)
+    : link;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(25_000) });
+    if (!res.ok) return null;
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (!buffer.length) return null;
+    return {
+      buffer,
+      mimeType: res.headers.get("content-type") || "image/jpeg",
+    };
+  } catch {
+    return null;
+  }
 }
 
 // Above this size the original is never downloaded for AI tagging — with no
